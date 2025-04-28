@@ -101,7 +101,9 @@ const HomeScreen: React.FC = () => {
 
   // Handle UDP messages using the service singleton
   useEffect(() => {
-    if (!isInitialized) return;
+    if (!isInitialized) {
+      return;
+    }
 
     // Subscribe to UDP messages
     const unsubscribe = UDPService.subscribe(handleESPMessage);
@@ -124,10 +126,14 @@ const HomeScreen: React.FC = () => {
   // Get device status
   const getDeviceStatus = (deviceId: string) => {
     const device = devices.find(d => d.id === deviceId);
-    if (!device) return 'Unknown';
+    if (!device) {
+      return 'Unknown';
+    }
 
     const audioFile = files.find(f => f.deviceId === deviceId);
-    if (!audioFile) return 'No audio assigned';
+    if (!audioFile) {
+      return 'No audio assigned';
+    }
 
     const lastSeen = device.lastSeen ? new Date(device.lastSeen) : null;
     const timeAgo = lastSeen
