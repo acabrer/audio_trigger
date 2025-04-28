@@ -20,6 +20,7 @@
     "postcss": "^8.5.3",
     "react": "19.0.0",
     "react-native": "0.79.1",
+    "react-native-ble-plx": "^3.5.0",
     "react-native-document-picker": "^9.3.1",
     "react-native-fs": "^2.20.0",
     "react-native-safe-area-context": "^5.4.0",

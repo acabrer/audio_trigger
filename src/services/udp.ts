@@ -1,8 +1,9 @@
 // src/services/udp.ts
 
-import {useState} from 'react';
+import {useState, useEffect} from 'react';
 import UDPSocket from 'react-native-udp';
 import {Buffer} from 'buffer';
+import StorageService from './storage';
 
 // Define types for ESP messages
 export interface ESPMessage {
@@ -11,9 +12,6 @@ export interface ESPMessage {
   timestamp: number;
   batteryLevel?: number;
 }
-
-// Define the port we'll listen on
-const UDP_PORT = 8888;
 
 // Function to parse incoming UDP messages from ESP devices
 const parseESPMessage = (message: Buffer): ESPMessage | null => {
@@ -45,20 +43,48 @@ export function useUDPListener() {
   const [messages, setMessages] = useState<ESPMessage[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [socket, setSocket] = useState<any>(null);
+  const [port, setPort] = useState<number>(8888); // Default port
+
+  // Load port from settings
+  useEffect(() => {
+    const loadPort = async () => {
+      try {
+        const settings = await StorageService.loadSettings();
+        setPort(settings.udpPort);
+      } catch (err) {
+        console.error('Failed to load UDP port setting:', err);
+        // Keep using default port
+      }
+    };
+
+    loadPort();
+  }, []);
 
   // Start the UDP listener
-  const startListener = () => {
+  const startListener = async () => {
     try {
-      const socket = UDPSocket.createSocket({type: 'udp4'});
+      // Make sure we have the latest port setting
+      const settings = await StorageService.loadSettings();
+      const udpPort = settings.udpPort;
+      setPort(udpPort);
 
-      socket.on('error', (err: Error) => {
+      // Clean up any existing socket
+      if (socket) {
+        socket.close();
+      }
+
+      const newSocket = UDPSocket.createSocket({type: 'udp4'});
+      setSocket(newSocket);
+
+      newSocket.on('error', (err: Error) => {
         console.error('UDP Socket Error:', err);
         setError(`UDP Socket Error: ${err.message}`);
-        socket.close();
+        newSocket.close();
         setIsListening(false);
       });
 
-      socket.on(
+      newSocket.on(
         'message',
         (msg: Buffer, _rinfo: {address: string; port: number}) => {
           const parsedMessage = parseESPMessage(msg);
@@ -72,42 +98,49 @@ export function useUDPListener() {
         },
       );
 
-      socket.bind(UDP_PORT, (err?: Error) => {
+      newSocket.bind(udpPort, (err?: Error) => {
         if (err) {
-          console.error('Failed to bind UDP socket:', err);
+          console.error(`Failed to bind UDP socket on port ${udpPort}:`, err);
           setError(`Failed to bind UDP socket: ${err.message}`);
           return;
         }
 
-        console.log(`UDP server listening on port ${UDP_PORT}`);
+        console.log(`UDP server listening on port ${udpPort}`);
         setIsListening(true);
         setError(null);
       });
 
-      // Return cleanup function
-      return () => {
-        socket.close();
-        setIsListening(false);
-      };
+      return;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error('Failed to start UDP listener:', errorMessage);
       setError(`Failed to start UDP listener: ${errorMessage}`);
-      return () => {}; // Return empty cleanup on error
     }
   };
 
   // Function to manually stop the listener
   const stopListener = () => {
-    // This is handled by the cleanup function returned by startListener
-    // This function is mostly for UI control
+    if (socket) {
+      socket.close();
+      setSocket(null);
+    }
     setIsListening(false);
   };
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, [socket]);
 
   return {
     messages,
     isListening,
     error,
+    port,
     startListener,
     stopListener,
   };
@@ -115,15 +148,22 @@ export function useUDPListener() {
 
 // Singleton UDP service for background listening
 let udpSocket: any = null;
+let currentPort: number = 8888; // Default port
 const messageHandlers: ((message: ESPMessage) => void)[] = [];
 
 export const UDPService = {
-  initialize: () => {
+  initialize: async () => {
+    // Clean up any existing socket first
     if (udpSocket) {
-      return;
+      udpSocket.close();
+      udpSocket = null;
     }
 
     try {
+      // Load the current port from settings
+      const settings = await StorageService.loadSettings();
+      currentPort = settings.udpPort;
+
       udpSocket = UDPSocket.createSocket({type: 'udp4'});
 
       udpSocket.on('error', (err: Error) => {
@@ -142,17 +182,33 @@ export const UDPService = {
         },
       );
 
-      udpSocket.bind(UDP_PORT, (err?: Error) => {
+      udpSocket.bind(currentPort, (err?: Error) => {
         if (err) {
-          console.error('Failed to bind UDP service socket:', err);
+          console.error(
+            `Failed to bind UDP service socket on port ${currentPort}:`,
+            err,
+          );
           return;
         }
 
-        console.log(`UDP service listening on port ${UDP_PORT}`);
+        console.log(`UDP service listening on port ${currentPort}`);
       });
     } catch (error) {
       console.error('Failed to initialize UDP service:', error);
     }
+  },
+
+  // Update UDP port and restart service
+  updatePort: async (newPort: number) => {
+    if (newPort === currentPort) {
+      return; // No change needed
+    }
+
+    currentPort = newPort;
+
+    // Restart service with new port
+    await UDPService.stop();
+    await UDPService.initialize();
   },
 
   subscribe: (handler: (message: ESPMessage) => void) => {
@@ -165,13 +221,14 @@ export const UDPService = {
     };
   },
 
-  stop: () => {
+  stop: async () => {
     if (udpSocket) {
       udpSocket.close();
       udpSocket = null;
     }
-    messageHandlers.length = 0;
   },
+
+  getCurrentPort: () => currentPort,
 };
 
 export default UDPService;

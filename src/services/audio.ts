@@ -1,4 +1,4 @@
-// src/services/audio.ts
+// Audio service for managing audio files and playback
 
 import TrackPlayer, {
   AppKilledPlaybackBehavior,
