@@ -1,5 +1,3 @@
-// Audio service for managing audio files and playback
-
 import SoundPlayer from 'react-native-sound-player';
 import RNFS from 'react-native-fs';
 
@@ -71,6 +69,7 @@ export const AudioService = {
         }
       }
 
+      console.log('Loaded audio files:', validFiles);
       return validFiles;
     } catch (error) {
       console.error('Failed to load audio files:', error);
@@ -116,6 +115,7 @@ export const AudioService = {
       // Save updated metadata
       const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
       await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
+      console.log('Added new audio file:', newFile);
 
       return newFile;
     } catch (error) {
@@ -170,13 +170,48 @@ export const AudioService = {
       // Load existing metadata
       const existingFiles = await AudioService.loadAudioFiles();
 
-      // Find and update the file
-      const updatedFiles = existingFiles.map(file => {
-        if (file.id === fileId) {
-          return {...file, deviceId};
-        }
-        return file;
-      });
+      // Check if any other file is already mapped to this device
+      const previouslyMappedIndex = existingFiles.findIndex(
+        file => file.deviceId === deviceId && file.id !== fileId,
+      );
+
+      // Find and update the file we want to map
+      const fileToMapIndex = existingFiles.findIndex(
+        file => file.id === fileId,
+      );
+
+      if (fileToMapIndex === -1) {
+        console.error('File not found for mapping:', fileId);
+        return false;
+      }
+
+      // Create a new array with the updates
+      const updatedFiles = [...existingFiles];
+
+      // If another file was mapped to this device, clear its mapping
+      if (previouslyMappedIndex !== -1) {
+        console.log(
+          'Removing previous device mapping from file:',
+          updatedFiles[previouslyMappedIndex].title,
+        );
+        updatedFiles[previouslyMappedIndex] = {
+          ...updatedFiles[previouslyMappedIndex],
+          deviceId: undefined,
+        };
+      }
+
+      // Update the target file with the new device ID
+      updatedFiles[fileToMapIndex] = {
+        ...updatedFiles[fileToMapIndex],
+        deviceId,
+      };
+
+      console.log(
+        'Mapped file to device:',
+        updatedFiles[fileToMapIndex].title,
+        'to device:',
+        deviceId,
+      );
 
       // Save updated metadata
       const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
@@ -192,6 +227,7 @@ export const AudioService = {
   // Find and play audio for an ESP device
   playAudioForDevice: async (deviceId: string): Promise<boolean> => {
     try {
+      console.log('Playing audio for device:', deviceId);
       // Load audio files
       const audioFiles = await AudioService.loadAudioFiles();
 
@@ -202,6 +238,12 @@ export const AudioService = {
         return false;
       }
 
+      console.log(
+        'Found audio file for device:',
+        audioFile.title,
+        audioFile.url,
+      );
+
       // Stop current playback if any
       try {
         SoundPlayer.stop();
@@ -211,6 +253,7 @@ export const AudioService = {
 
       // Play the audio file
       try {
+        console.log('Playing URL:', audioFile.url);
         SoundPlayer.playUrl(audioFile.url);
         return true;
       } catch (e) {

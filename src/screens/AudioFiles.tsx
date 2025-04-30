@@ -10,11 +10,12 @@ import {
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
-import DocumentPicker, {types} from '@react-native-documents/picker';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
 import {addFile, removeFile, setFiles} from '../store/slices/audioFiles';
 import AudioService, {AudioFile} from '../services/audio';
 import {RootStackParamList} from '../types/types';
+// Simplified import with no unused types
+import {pick, types} from '@react-native-documents/picker';
 
 type AudioFilesScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -43,41 +44,61 @@ const AudioFilesScreen: React.FC = () => {
   }, [dispatch]);
 
   // Pick an audio file using the document picker
-
   const pickAudioFile = async () => {
     try {
       setIsAdding(true);
-      const result = await DocumentPicker.pick({
+      console.log('Opening document picker...');
+
+      // Use the document picker API
+      const results = await pick({
         type: [types.audio],
-        copyTo: 'documentDirectory',
       });
 
-      const pickedFile = result[0];
+      if (!results || results.length === 0) {
+        console.log('No file was picked');
+        return;
+      }
 
-      // Get a title for the file - either use the filename or ask the user
+      const pickedFile = results[0];
+      console.log('Document picker result:', pickedFile);
+
+      // Get a title for the file
       let fileTitle =
         pickedFile.name?.split('.').slice(0, -1).join('.') || 'Untitled Audio';
 
-      // Add the file to our audio service and store
-      if (pickedFile.uri) {
-        const newFile = await AudioService.addAudioFile(
-          pickedFile.uri,
-          fileTitle,
-        );
+      // Make sure we have a valid URI
+      if (!pickedFile.uri) {
+        console.error('Picked file has no URI');
+        Alert.alert('Error', 'Selected file is invalid', [{text: 'OK'}]);
+        return;
+      }
 
-        if (newFile) {
-          dispatch(addFile(newFile));
-          Alert.alert('Success', 'Audio file added successfully', [
+      // Add the file directly without keepLocalCopy since it's causing type issues
+      console.log('Adding audio file:', pickedFile.uri);
+      const newFile = await AudioService.addAudioFile(
+        pickedFile.uri,
+        fileTitle,
+      );
+
+      if (newFile) {
+        dispatch(addFile(newFile));
+        Alert.alert('Success', 'Audio file added successfully', [{text: 'OK'}]);
+      } else {
+        Alert.alert('Error', 'Failed to add audio file', [{text: 'OK'}]);
+      }
+    } catch (err) {
+      console.error('Error picking document:', err);
+
+      // Error handling
+      if (err instanceof Error) {
+        if (err.message === 'User canceled document picker') {
+          console.log('Document picker cancelled by user');
+        } else {
+          Alert.alert('Error', `Failed to pick audio file: ${err.message}`, [
             {text: 'OK'},
           ]);
-        } else {
-          Alert.alert('Error', 'Failed to add audio file', [{text: 'OK'}]);
         }
-      }
-    } catch (err: any) {
-      // Fixed error handling - check for error code directly
-      if (!(err && err.code === 'DOCUMENT_PICKER_CANCELED')) {
-        console.error('Error picking document:', err);
+      } else {
         Alert.alert('Error', 'Failed to pick audio file', [{text: 'OK'}]);
       }
     } finally {

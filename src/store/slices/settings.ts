@@ -5,7 +5,7 @@ import {AppSettings} from '../../services/storage';
 
 // Default app settings
 const initialState: AppSettings = {
-  udpPort: 8888,
+  udpPort: 4210, // Updated to match ESP8266 port
   autoStartListener: true,
   maxVolume: 1.0,
   darkMode: false,
