@@ -20,7 +20,7 @@ import {
 import StorageService from '../services/storage';
 import {RootStackParamList} from '../types/types';
 import UDPService from '../services/udp';
-import TrackPlayer from 'react-native-track-player';
+import SoundPlayer from 'react-native-sound-player'; // Changed from TrackPlayer
 
 type SettingsScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -75,7 +75,11 @@ const SettingsScreen: React.FC = () => {
       dispatch(updateSettings(updatedSettings));
 
       // Apply volume setting to the audio player
-      await TrackPlayer.setVolume(volumeValue);
+      try {
+        SoundPlayer.setVolume(volumeValue); // Changed from TrackPlayer
+      } catch (error) {
+        console.error('Error setting volume:', error);
+      }
 
       // If UDP port changed, restart the UDP service
       if (updatedSettings.udpPort !== settings.udpPort) {

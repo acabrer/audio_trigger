@@ -1,6 +1,6 @@
 // src/services/udp.ts
 
-import {useState, useEffect} from 'react';
+import {useState, useEffect, useRef} from 'react';
 import UDPSocket from 'react-native-udp';
 import {Buffer} from 'buffer';
 import StorageService from './storage';
@@ -43,8 +43,10 @@ export function useUDPListener() {
   const [messages, setMessages] = useState<ESPMessage[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [socket, setSocket] = useState<any>(null);
+  const socketRef = useRef<any>(null);
   const [port, setPort] = useState<number>(8888); // Default port
+  const isStartingRef = useRef<boolean>(false);
+  const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load port from settings
   useEffect(() => {
@@ -61,27 +63,68 @@ export function useUDPListener() {
     loadPort();
   }, []);
 
+  // Helper function to safely close socket
+  const safelyCloseSocket = () => {
+    if (socketRef.current) {
+      try {
+        // Remove all listeners first to prevent callback errors
+        socketRef.current.removeAllListeners('error');
+        socketRef.current.removeAllListeners('message');
+        socketRef.current.close();
+      } catch (err) {
+        console.warn('Error while closing socket:', err);
+      }
+      socketRef.current = null;
+    }
+  };
+
+  // Set error with automatic clearing after 5 seconds
+  const setErrorWithTimeout = (errorMsg: string) => {
+    setError(errorMsg);
+
+    // Clear any existing timeout
+    if (errorTimeoutRef.current) {
+      clearTimeout(errorTimeoutRef.current);
+    }
+
+    // Set new timeout to clear error after 5 seconds
+    errorTimeoutRef.current = setTimeout(() => {
+      setError(null);
+    }, 5000);
+  };
+
   // Start the UDP listener
   const startListener = async () => {
+    // Prevent multiple simultaneous start attempts
+    if (isStartingRef.current) return;
+    isStartingRef.current = true;
+
     try {
+      // Clean up any existing socket first
+      safelyCloseSocket();
+
       // Make sure we have the latest port setting
       const settings = await StorageService.loadSettings();
       const udpPort = settings.udpPort;
       setPort(udpPort);
 
-      // Clean up any existing socket
-      if (socket) {
-        socket.close();
-      }
-
       const newSocket = UDPSocket.createSocket({type: 'udp4'});
-      setSocket(newSocket);
+      socketRef.current = newSocket;
 
       newSocket.on('error', (err: Error) => {
         console.error('UDP Socket Error:', err);
-        setError(`UDP Socket Error: ${err.message}`);
-        newSocket.close();
-        setIsListening(false);
+        setErrorWithTimeout(`UDP Socket Error: ${err.message}`);
+
+        // Don't close socket on every error, let's be more resilient
+        // Only stop if we keep getting errors
+        if (isListening) {
+          // If we're already listening, this is a runtime error
+          // Let's not close the socket immediately
+        } else {
+          // If we're not listening yet, this is a startup error
+          safelyCloseSocket();
+          setIsListening(false);
+        }
       });
 
       newSocket.on(
@@ -99,9 +142,12 @@ export function useUDPListener() {
       );
 
       newSocket.bind(udpPort, (err?: Error) => {
+        isStartingRef.current = false;
+
         if (err) {
           console.error(`Failed to bind UDP socket on port ${udpPort}:`, err);
-          setError(`Failed to bind UDP socket: ${err.message}`);
+          setErrorWithTimeout(`Failed to bind UDP socket: ${err.message}`);
+          safelyCloseSocket();
           return;
         }
 
@@ -114,27 +160,27 @@ export function useUDPListener() {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error('Failed to start UDP listener:', errorMessage);
-      setError(`Failed to start UDP listener: ${errorMessage}`);
+      setErrorWithTimeout(`Failed to start UDP listener: ${errorMessage}`);
+      safelyCloseSocket();
+      isStartingRef.current = false;
     }
   };
 
   // Function to manually stop the listener
   const stopListener = () => {
-    if (socket) {
-      socket.close();
-      setSocket(null);
-    }
+    safelyCloseSocket();
     setIsListening(false);
   };
 
   // Clean up on unmount
   useEffect(() => {
     return () => {
-      if (socket) {
-        socket.close();
+      safelyCloseSocket();
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current);
       }
     };
-  }, [socket]);
+  }, []);
 
   return {
     messages,
@@ -150,14 +196,49 @@ export function useUDPListener() {
 let udpSocket: any = null;
 let currentPort: number = 8888; // Default port
 const messageHandlers: ((message: ESPMessage) => void)[] = [];
+let reconnectTimeout: NodeJS.Timeout | null = null;
+let errorCount = 0;
+const MAX_ERROR_COUNT = 5;
+const ERROR_RESET_INTERVAL = 60000; // 1 minute
+let errorResetInterval: NodeJS.Timeout | null = null;
+
+// Helper function to safely close the UDP socket
+const safelyCloseUDPSocket = () => {
+  if (udpSocket) {
+    try {
+      // Remove all listeners first to prevent callback errors
+      udpSocket.removeAllListeners('error');
+      udpSocket.removeAllListeners('message');
+      udpSocket.close();
+    } catch (err) {
+      console.warn('Error while closing UDP service socket:', err);
+    }
+    udpSocket = null;
+  }
+
+  // Clear any pending reconnect timeout
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+};
 
 export const UDPService = {
   initialize: async () => {
     // Clean up any existing socket first
-    if (udpSocket) {
-      udpSocket.close();
-      udpSocket = null;
+    safelyCloseUDPSocket();
+
+    // Reset error count
+    errorCount = 0;
+
+    // Set up error reset interval
+    if (errorResetInterval) {
+      clearInterval(errorResetInterval);
     }
+
+    errorResetInterval = setInterval(() => {
+      errorCount = 0;
+    }, ERROR_RESET_INTERVAL);
 
     try {
       // Load the current port from settings
@@ -168,7 +249,26 @@ export const UDPService = {
 
       udpSocket.on('error', (err: Error) => {
         console.error('UDP Service Error:', err);
-        UDPService.stop();
+
+        // Increment error count
+        errorCount++;
+
+        // If we've hit too many errors, stop trying for a while
+        if (errorCount >= MAX_ERROR_COUNT) {
+          console.warn(
+            `Too many UDP errors (${errorCount}), pausing for 30 seconds`,
+          );
+          UDPService.stop();
+
+          // Try again after 30 seconds
+          reconnectTimeout = setTimeout(() => {
+            UDPService.initialize();
+          }, 30000);
+
+          return;
+        }
+
+        // For less severe error situations, don't necessarily stop
       });
 
       udpSocket.on(
@@ -188,10 +288,29 @@ export const UDPService = {
             `Failed to bind UDP service socket on port ${currentPort}:`,
             err,
           );
+
+          // Increment error count
+          errorCount++;
+
+          // If we've hit too many errors, stop trying for a while
+          if (errorCount >= MAX_ERROR_COUNT) {
+            console.warn(
+              `Too many UDP binding errors (${errorCount}), pausing for 30 seconds`,
+            );
+            UDPService.stop();
+
+            // Try again after 30 seconds
+            reconnectTimeout = setTimeout(() => {
+              UDPService.initialize();
+            }, 30000);
+          }
+
           return;
         }
 
         console.log(`UDP service listening on port ${currentPort}`);
+        // Reset error count on successful bind
+        errorCount = 0;
       });
     } catch (error) {
       console.error('Failed to initialize UDP service:', error);
@@ -222,9 +341,12 @@ export const UDPService = {
   },
 
   stop: async () => {
-    if (udpSocket) {
-      udpSocket.close();
-      udpSocket = null;
+    safelyCloseUDPSocket();
+
+    // Clear error reset interval
+    if (errorResetInterval) {
+      clearInterval(errorResetInterval);
+      errorResetInterval = null;
     }
   },
 

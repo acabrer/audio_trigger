@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
-import DocumentPicker, {types} from 'react-native-document-picker';
+import DocumentPicker, {types} from '@react-native-documents/picker';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
 import {addFile, removeFile, setFiles} from '../store/slices/audioFiles';
 import AudioService, {AudioFile} from '../services/audio';
@@ -43,6 +43,7 @@ const AudioFilesScreen: React.FC = () => {
   }, [dispatch]);
 
   // Pick an audio file using the document picker
+
   const pickAudioFile = async () => {
     try {
       setIsAdding(true);
@@ -58,9 +59,9 @@ const AudioFilesScreen: React.FC = () => {
         pickedFile.name?.split('.').slice(0, -1).join('.') || 'Untitled Audio';
 
       // Add the file to our audio service and store
-      if (pickedFile.fileCopyUri) {
+      if (pickedFile.uri) {
         const newFile = await AudioService.addAudioFile(
-          pickedFile.fileCopyUri,
+          pickedFile.uri,
           fileTitle,
         );
 
@@ -73,8 +74,9 @@ const AudioFilesScreen: React.FC = () => {
           Alert.alert('Error', 'Failed to add audio file', [{text: 'OK'}]);
         }
       }
-    } catch (err) {
-      if (!DocumentPicker.isCancel(err)) {
+    } catch (err: any) {
+      // Fixed error handling - check for error code directly
+      if (!(err && err.code === 'DOCUMENT_PICKER_CANCELED')) {
         console.error('Error picking document:', err);
         Alert.alert('Error', 'Failed to pick audio file', [{text: 'OK'}]);
       }

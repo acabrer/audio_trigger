@@ -10,6 +10,7 @@ import {setFiles} from './store/slices/audioFiles';
 import {setDevices} from './store/slices/espDevices';
 import {setSettings} from './store/slices/settings';
 import StorageService from './services/storage';
+import '../global.css';
 
 function App(): React.JSX.Element {
   // Initialize app services and load data

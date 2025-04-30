@@ -7,11 +7,14 @@
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
-    "test": "jest"
+    "test": "jest",
+    "clean": "watchman watch-del-all && rm -rf node_modules/ && yarn cache clean && yarn",
+    "pod-install": "cd ios && pod install && cd .."
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.1.2",
     "@react-native-community/slider": "^4.5.6",
+    "@react-native-documents/picker": "^10.1.2",
     "@react-navigation/native": "^7.1.6",
     "@react-navigation/native-stack": "^7.3.10",
     "@reduxjs/toolkit": "^2.7.0",
@@ -21,11 +24,11 @@
     "react": "19.0.0",
     "react-native": "0.79.1",
     "react-native-ble-plx": "^3.5.0",
-    "react-native-document-picker": "^9.3.1",
     "react-native-fs": "^2.20.0",
+    "react-native-reanimated": "^3.8.0",
     "react-native-safe-area-context": "^5.4.0",
     "react-native-screens": "^4.10.0",
-    "react-native-track-player": "^4.1.1",
+    "react-native-sound-player": "^0.14.5",
     "react-native-udp": "^4.1.7",
     "react-redux": "^9.2.0",
     "tailwindcss": "^3.4.17"

@@ -1,12 +1,6 @@
 // Audio service for managing audio files and playback
 
-import TrackPlayer, {
-  AppKilledPlaybackBehavior,
-  Capability,
-  Event,
-  RepeatMode,
-  State,
-} from 'react-native-track-player';
+import SoundPlayer from 'react-native-sound-player';
 import RNFS from 'react-native-fs';
 
 // Define types for audio files
@@ -17,46 +11,6 @@ export interface AudioFile {
   deviceId?: string; // ESP device ID this audio is mapped to
 }
 
-// Setup track player with necessary capabilities
-export const setupPlayer = async () => {
-  let isSetup = false;
-  try {
-    // Check if the player is already initialized
-    await TrackPlayer.getState();
-    isSetup = true;
-  } catch {
-    // Initialize the player if it isn't setup yet
-    await TrackPlayer.setupPlayer();
-    await TrackPlayer.updateOptions({
-      android: {
-        appKilledPlaybackBehavior:
-          AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification,
-      },
-      capabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.Stop,
-        Capability.JumpForward,
-        Capability.JumpBackward,
-      ],
-      compactCapabilities: [Capability.Play, Capability.Pause, Capability.Stop],
-      notificationCapabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.Stop,
-      ],
-      progressUpdateEventInterval: 2,
-    });
-
-    // Set repeat mode to off by default
-    await TrackPlayer.setRepeatMode(RepeatMode.Off);
-
-    isSetup = true;
-  }
-
-  return isSetup;
-};
-
 // Default directory for audio files
 const AUDIO_DIRECTORY = `${RNFS.DocumentDirectoryPath}/audio_files`;
 
@@ -65,14 +19,16 @@ export const AudioService = {
   // Initialize the audio service
   initialize: async () => {
     try {
-      // Setup the player
-      await setupPlayer();
-
       // Create audio directory if it doesn't exist
       const dirExists = await RNFS.exists(AUDIO_DIRECTORY);
       if (!dirExists) {
         await RNFS.mkdir(AUDIO_DIRECTORY);
       }
+
+      // Setup event listeners
+      SoundPlayer.addEventListener('FinishedPlaying', ({success}) => {
+        console.log('Finished playing audio:', success);
+      });
 
       console.log('Audio service initialized');
       return true;
@@ -108,7 +64,8 @@ export const AudioService = {
       // Verify all files exist
       const validFiles = [];
       for (const file of audioFiles) {
-        const exists = await RNFS.exists(file.url);
+        const filePath = file.url.replace('file://', '');
+        const exists = await RNFS.exists(filePath);
         if (exists) {
           validFiles.push(file);
         }
@@ -179,6 +136,13 @@ export const AudioService = {
         return false;
       }
 
+      // Stop playback if this is the current file
+      try {
+        SoundPlayer.stop();
+      } catch (e) {
+        // Ignore errors when stopping - might not be playing
+      }
+
       // Remove file from filesystem
       const filePath = fileToDelete.url.replace('file://', '');
       if (await RNFS.exists(filePath)) {
@@ -238,24 +202,21 @@ export const AudioService = {
         return false;
       }
 
-      // Get player state
-      const playerState = await TrackPlayer.getState();
-
-      // Stop current track if playing
-      if (playerState === State.Playing || playerState === State.Paused) {
-        await TrackPlayer.reset();
+      // Stop current playback if any
+      try {
+        SoundPlayer.stop();
+      } catch (e) {
+        // Ignore errors when stopping - might not be playing
       }
 
-      // Add and play the track
-      await TrackPlayer.add({
-        id: audioFile.id,
-        url: audioFile.url,
-        title: audioFile.title,
-        artist: 'ESP Audio Trigger',
-      });
-
-      await TrackPlayer.play();
-      return true;
+      // Play the audio file
+      try {
+        SoundPlayer.playUrl(audioFile.url);
+        return true;
+      } catch (e) {
+        console.error('Error playing audio:', e);
+        return false;
+      }
     } catch (error) {
       console.error('Failed to play audio for device:', error);
       return false;
@@ -265,18 +226,23 @@ export const AudioService = {
   // Stop playback
   stopPlayback: async (): Promise<void> => {
     try {
-      await TrackPlayer.stop();
+      SoundPlayer.stop();
     } catch (error) {
       console.error('Failed to stop playback:', error);
     }
   },
-};
 
-// Register playback service
-export const PlaybackService = async function () {
-  TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
-  TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause());
-  TrackPlayer.addEventListener(Event.RemoteStop, () => TrackPlayer.stop());
+  // Cleanup resources
+  cleanup: () => {
+    try {
+      // Remove event listeners
+      SoundPlayer.unmount();
+      // Stop any playing audio
+      SoundPlayer.stop();
+    } catch (error) {
+      console.error('Failed to clean up audio service:', error);
+    }
+  },
 };
 
 export default AudioService;
