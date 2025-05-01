@@ -1,3 +1,5 @@
+// src/services/audio.ts
+
 import {
   AudioContext,
   AudioBufferSourceNode,
@@ -366,7 +368,11 @@ export const AudioService = {
       // Find all sounds playing for this device
       for (const [fileId, sound] of AudioService.activeSounds.entries()) {
         if (sound.deviceId === deviceId) {
-          sound.source.stop(0);
+          try {
+            sound.source.stop(0);
+          } catch (err) {
+            console.error('Failed to stop sound source:', err);
+          }
           AudioService.activeSounds.delete(fileId);
         }
       }
@@ -375,18 +381,46 @@ export const AudioService = {
     }
   },
 
-  // Stop all playback
+  // Stop all playback - Fixed to properly handle all active sounds
   stopPlayback: async (): Promise<void> => {
     try {
+      console.log(
+        `Stopping all audio playback, active sounds: ${AudioService.activeSounds.size}`,
+      );
+
+      // Create a new array from the entries to avoid modification during iteration
+      const activeSoundsEntries = Array.from(
+        AudioService.activeSounds.entries(),
+      );
+
       // Stop all active sounds
-      for (const [_, sound] of AudioService.activeSounds.entries()) {
-        sound.source.stop(0);
+      for (const [fileId, sound] of activeSoundsEntries) {
+        try {
+          console.log(
+            `Stopping sound with ID: ${fileId} for device: ${sound.deviceId}`,
+          );
+          sound.source.stop(0);
+          AudioService.activeSounds.delete(fileId);
+        } catch (err) {
+          console.error(`Error stopping sound ${fileId}:`, err);
+          // Still remove from active sounds even if there was an error
+          AudioService.activeSounds.delete(fileId);
+        }
       }
 
-      // Clear the active sounds map
-      AudioService.activeSounds.clear();
+      // Double check that all sounds were stopped
+      if (AudioService.activeSounds.size > 0) {
+        console.warn(
+          `There are still ${AudioService.activeSounds.size} sounds in the active sounds map after stopping all. Clearing anyway.`,
+        );
+        AudioService.activeSounds.clear();
+      }
+
+      console.log('All audio playback stopped');
     } catch (error) {
       console.error('Failed to stop playback:', error);
+      // Force clear all active sounds as a last resort
+      AudioService.activeSounds.clear();
     }
   },
 

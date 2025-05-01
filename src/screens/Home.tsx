@@ -206,12 +206,14 @@ const HomeScreen: React.FC = () => {
 
   // Global stop audio function - stops all playing sounds
   const stopAllAudio = useCallback(() => {
+    console.log('Stopping all audio from Home screen');
     AudioService.stopPlayback();
     setPlayingDevices([]);
   }, []);
 
   // Function to stop audio for a specific device
   const stopDeviceAudio = useCallback((deviceId: string) => {
+    console.log(`Stopping audio for device ${deviceId}`);
     AudioService.stopDeviceAudio(deviceId);
     setPlayingDevices(prev => prev.filter(id => id !== deviceId));
   }, []);
@@ -224,12 +226,6 @@ const HomeScreen: React.FC = () => {
         return 'Unknown';
       }
 
-      const audioFile = files.find(f => f.deviceId === deviceId);
-
-      if (!audioFile) {
-        return 'No audio assigned';
-      }
-
       const lastSeen = device.lastSeen ? new Date(device.lastSeen) : null;
       const timeAgo = lastSeen
         ? Math.floor((Date.now() - lastSeen.getTime()) / 60000) === 0
@@ -239,7 +235,7 @@ const HomeScreen: React.FC = () => {
 
       return `Last seen: ${timeAgo}`;
     },
-    [devices, files],
+    [devices],
   );
 
   // Function to test audio for a device
@@ -269,10 +265,18 @@ const HomeScreen: React.FC = () => {
     [playingDevices],
   );
 
+  // Find audio file for device
+  const getDeviceAudioFile = useCallback(
+    (deviceId: string) => {
+      return files.find(file => file.deviceId === deviceId);
+    },
+    [files],
+  );
+
   // Memoize the render function to prevent recreating on every render
   const renderDeviceItem = useCallback(
     ({item}: {item: ESPDevice}) => {
-      const audioFile = files.find(f => f.deviceId === item.id);
+      const audioFile = getDeviceAudioFile(item.id);
       const devicePlaying = isDevicePlaying(item.id);
 
       return (
@@ -288,13 +292,15 @@ const HomeScreen: React.FC = () => {
             <Text className="text-sm text-gray-500 mb-1">
               {getDeviceStatus(item.id)}
             </Text>
-            {audioFile && (
+            {audioFile ? (
               <Text
                 className={`text-sm ${
                   devicePlaying ? 'text-green-600 font-bold' : 'text-blue-600'
                 }`}>
                 Audio: {audioFile.title} {devicePlaying ? '(Playing)' : ''}
               </Text>
+            ) : (
+              <Text className="text-sm text-orange-600">No audio assigned</Text>
             )}
           </View>
           <View className="flex-row">
@@ -325,7 +331,7 @@ const HomeScreen: React.FC = () => {
       );
     },
     [
-      files,
+      getDeviceAudioFile,
       getDeviceStatus,
       navigation,
       testAudio,
@@ -456,7 +462,11 @@ const HomeScreen: React.FC = () => {
             keyExtractor={keyExtractor}
             contentContainerStyle={{paddingBottom: 16}}
             ListEmptyComponent={ListEmptyComponent}
-            extraData={[deviceUpdateCount, playingDevices]} // Re-render when these change
+            extraData={[
+              deviceUpdateCount,
+              playingDevices,
+              files,
+            ]} /* Include files in extraData */
           />
         )}
       </View>
