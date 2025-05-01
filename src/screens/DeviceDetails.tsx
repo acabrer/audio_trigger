@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useState, useEffect} from 'react';
 import {
   View,
   Text,
@@ -43,6 +43,20 @@ const DeviceDetailsScreen: React.FC = () => {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(
     assignedFile?.id || null,
   );
+  // Track if this device's audio is playing
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  // Check playing status periodically
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const devicePlaying = AudioService.isDevicePlaying(deviceId);
+      if (devicePlaying !== isPlaying) {
+        setIsPlaying(devicePlaying);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [deviceId, isPlaying]);
 
   // Battery level formatting
   const formatBatteryLevel = (level?: number) => {
@@ -98,6 +112,12 @@ const DeviceDetailsScreen: React.FC = () => {
   // Test audio playback
   const testAudio = () => {
     AudioService.playAudioForDevice(deviceId);
+  };
+
+  // Stop only this device's audio
+  const stopAudio = () => {
+    AudioService.stopDeviceAudio(deviceId);
+    setIsPlaying(false);
   };
 
   // Remove device from the app
@@ -222,13 +242,25 @@ const DeviceDetailsScreen: React.FC = () => {
               </View>
 
               {selectedFileId && (
-                <TouchableOpacity
-                  className="mb-4 bg-green-600 p-3 rounded-lg"
-                  onPress={testAudio}>
-                  <Text className="text-white text-center font-bold">
-                    Test Audio
-                  </Text>
-                </TouchableOpacity>
+                <View className="flex-row mb-4">
+                  <TouchableOpacity
+                    className="flex-1 mr-2 bg-green-600 p-3 rounded-lg"
+                    onPress={testAudio}>
+                    <Text className="text-white text-center font-bold">
+                      Play Sound
+                    </Text>
+                  </TouchableOpacity>
+
+                  {isPlaying && (
+                    <TouchableOpacity
+                      className="flex-1 ml-2 bg-red-600 p-3 rounded-lg"
+                      onPress={stopAudio}>
+                      <Text className="text-white text-center font-bold">
+                        Stop Sound
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               )}
             </>
           )}

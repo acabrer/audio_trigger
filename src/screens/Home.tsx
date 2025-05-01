@@ -39,9 +39,28 @@ const HomeScreen: React.FC = () => {
   const [lastMessageTimestamp, setLastMessageTimestamp] = useState(0);
   const [lastMessage, setLastMessage] = useState<ESPMessage | null>(null);
   const [deviceUpdateCount, setDeviceUpdateCount] = useState(0);
+  // Track active sounds
+  const [playingDevices, setPlayingDevices] = useState<string[]>([]);
 
   // Use the UDP listener hook with stable references
   const {isListening, startListener, stopListener, error} = useUDPListener();
+
+  // Check for active sounds periodically
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const currentPlaying = AudioService.getPlayingDevices();
+
+      // Only update state if the playing devices have changed
+      if (
+        JSON.stringify(currentPlaying.sort()) !==
+        JSON.stringify(playingDevices.sort())
+      ) {
+        setPlayingDevices(currentPlaying);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [playingDevices]);
 
   // Handle ESP button press - debounce device updates
   const handleESPMessage = useCallback(
@@ -85,7 +104,7 @@ const HomeScreen: React.FC = () => {
         }
       }
 
-      // If button was pressed, play associated audio
+      // If button was pressed, play associated audio - now allows multiple sounds simultaneously
       if (message.buttonPressed) {
         console.log('Button was pressed, attempting to play audio...');
         const success = await AudioService.playAudioForDevice(message.deviceId);
@@ -93,6 +112,14 @@ const HomeScreen: React.FC = () => {
           console.log('No audio file associated with this device.');
         } else {
           console.log('Successfully played audio for device');
+
+          // Update playing devices
+          setPlayingDevices(prev => {
+            if (!prev.includes(message.deviceId)) {
+              return [...prev, message.deviceId];
+            }
+            return prev;
+          });
         }
       }
     },
@@ -177,6 +204,18 @@ const HomeScreen: React.FC = () => {
     }
   }, [isListening, startListener, stopListener]);
 
+  // Global stop audio function - stops all playing sounds
+  const stopAllAudio = useCallback(() => {
+    AudioService.stopPlayback();
+    setPlayingDevices([]);
+  }, []);
+
+  // Function to stop audio for a specific device
+  const stopDeviceAudio = useCallback((deviceId: string) => {
+    AudioService.stopDeviceAudio(deviceId);
+    setPlayingDevices(prev => prev.filter(id => id !== deviceId));
+  }, []);
+
   // Get device status - memoize to reduce recalculations
   const getDeviceStatus = useCallback(
     (deviceId: string) => {
@@ -211,13 +250,30 @@ const HomeScreen: React.FC = () => {
       console.log(
         'No audio file associated with this device or playback failed',
       );
+    } else {
+      // Update playing devices
+      setPlayingDevices(prev => {
+        if (!prev.includes(deviceId)) {
+          return [...prev, deviceId];
+        }
+        return prev;
+      });
     }
   }, []);
+
+  // Check if a device sound is playing
+  const isDevicePlaying = useCallback(
+    (deviceId: string) => {
+      return playingDevices.includes(deviceId);
+    },
+    [playingDevices],
+  );
 
   // Memoize the render function to prevent recreating on every render
   const renderDeviceItem = useCallback(
     ({item}: {item: ESPDevice}) => {
       const audioFile = files.find(f => f.deviceId === item.id);
+      const devicePlaying = isDevicePlaying(item.id);
 
       return (
         <TouchableOpacity
@@ -233,20 +289,49 @@ const HomeScreen: React.FC = () => {
               {getDeviceStatus(item.id)}
             </Text>
             {audioFile && (
-              <Text className="text-sm text-blue-600">
-                Audio: {audioFile.title}
+              <Text
+                className={`text-sm ${
+                  devicePlaying ? 'text-green-600 font-bold' : 'text-blue-600'
+                }`}>
+                Audio: {audioFile.title} {devicePlaying ? '(Playing)' : ''}
               </Text>
             )}
           </View>
-          <TouchableOpacity
-            className="bg-blue-600 px-4 py-2 rounded-lg self-center"
-            onPress={() => testAudio(item.id)}>
-            <Text className="text-white font-bold">Test</Text>
-          </TouchableOpacity>
+          <View className="flex-row">
+            {devicePlaying ? (
+              <TouchableOpacity
+                className="bg-red-600 px-4 py-2 rounded-lg self-center mr-2"
+                onPress={() => stopDeviceAudio(item.id)}>
+                <Text className="text-white font-bold">Stop</Text>
+              </TouchableOpacity>
+            ) : (
+              audioFile && (
+                <TouchableOpacity
+                  className="bg-blue-600 px-4 py-2 rounded-lg self-center mr-2"
+                  onPress={() => testAudio(item.id)}>
+                  <Text className="text-white font-bold">Play</Text>
+                </TouchableOpacity>
+              )
+            )}
+            <TouchableOpacity
+              className="bg-gray-600 px-4 py-2 rounded-lg self-center"
+              onPress={() =>
+                navigation.navigate('DeviceDetails', {deviceId: item.id})
+              }>
+              <Text className="text-white font-bold">Details</Text>
+            </TouchableOpacity>
+          </View>
         </TouchableOpacity>
       );
     },
-    [files, getDeviceStatus, navigation, testAudio],
+    [
+      files,
+      getDeviceStatus,
+      navigation,
+      testAudio,
+      stopDeviceAudio,
+      isDevicePlaying,
+    ],
   );
 
   // Memoize the list key extractor
@@ -273,23 +358,59 @@ const HomeScreen: React.FC = () => {
         <Text className="text-xl font-bold text-gray-900">
           ESP Audio Trigger
         </Text>
-        <TouchableOpacity
-          className={`px-4 py-2 rounded-lg ${
-            isListening ? 'bg-green-600' : 'bg-gray-600'
-          }`}
-          onPress={toggleListener}
-          disabled={isLoading}>
-          <Text className="text-white font-bold">
-            {isLoading ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : isListening ? (
-              'Listening'
-            ) : (
-              'Start Listening'
-            )}
-          </Text>
-        </TouchableOpacity>
+        <View className="flex-row">
+          {/* Only show Stop All button if sounds are playing */}
+          {playingDevices.length > 0 && (
+            <TouchableOpacity
+              className="px-4 py-2 mr-2 rounded-lg bg-red-600"
+              onPress={stopAllAudio}>
+              <Text className="text-white font-bold">Stop All</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            className={`px-4 py-2 rounded-lg ${
+              isListening ? 'bg-green-600' : 'bg-gray-600'
+            }`}
+            onPress={toggleListener}
+            disabled={isLoading}>
+            <Text className="text-white font-bold">
+              {isLoading ? (
+                <ActivityIndicator size="small" color="#ffffff" />
+              ) : isListening ? (
+                'Listening'
+              ) : (
+                'Start Listening'
+              )}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
+
+      {/* Now Playing Banner - show if sounds are playing */}
+      {playingDevices.length > 0 && (
+        <View className="bg-green-100 p-3 mx-4 mt-2 rounded-lg">
+          <Text className="text-green-800 font-bold">Now Playing:</Text>
+          {playingDevices.map(deviceId => {
+            const device = devices.find(d => d.id === deviceId);
+            const audioFile = files.find(f => f.deviceId === deviceId);
+            return (
+              <View
+                key={deviceId}
+                className="flex-row justify-between items-center mt-1">
+                <Text className="text-green-800">
+                  {device?.name || `Device ${deviceId}`}:{' '}
+                  {audioFile?.title || 'Unknown'}
+                </Text>
+                <TouchableOpacity
+                  className="bg-red-600 px-2 py-1 rounded"
+                  onPress={() => stopDeviceAudio(deviceId)}>
+                  <Text className="text-white text-xs">Stop</Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+        </View>
+      )}
 
       {/* Port information */}
       <View className="bg-blue-50 p-3 mx-4 mt-2 rounded-lg">
@@ -335,7 +456,7 @@ const HomeScreen: React.FC = () => {
             keyExtractor={keyExtractor}
             contentContainerStyle={{paddingBottom: 16}}
             ListEmptyComponent={ListEmptyComponent}
-            extraData={deviceUpdateCount} // Only re-render when this changes
+            extraData={[deviceUpdateCount, playingDevices]} // Re-render when these change
           />
         )}
       </View>
