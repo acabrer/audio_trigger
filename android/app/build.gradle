@@ -92,17 +92,21 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release { // Add this block
+            storeFile file('esp-trigger.jks')
+            storePassword project.KEYSTORE_PASSWORD
+            keyAlias project.KEY_ALIAS
+            keyPassword project.KEY_PASSWORD
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
-            minifyEnabled enableProguardInReleaseBuilds
-            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+            signingConfig signingConfigs.release
+            minifyEnabled true // Enables ProGuard to shrink the APK
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 }
