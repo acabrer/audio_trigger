@@ -3,7 +3,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  TextInput,
   ScrollView,
   SafeAreaView,
 } from 'react-native';
@@ -15,6 +14,12 @@ import {updateDevice, removeDevice} from '../store/slices/espDevices';
 import AudioService from '../services/audio';
 import {AudioFile} from '../services/audio';
 import {setFiles} from '../store/slices/audioFiles';
+
+// Import our new components
+import Header from '../components/Header';
+import DeviceInfoCard from '../components/devices/DeviceInfoCard';
+import AudioAssignmentCard from '../components/devices/AudioAssignmentCard';
+import DangerZoneCard from '../components/common/DangerZoneCard';
 
 type DeviceDetailsScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -119,6 +124,7 @@ const DeviceDetailsScreen: React.FC = () => {
       }
     }
   };
+
   // Test audio playback
   const testAudio = () => {
     AudioService.playAudioForDevice(deviceId);
@@ -158,138 +164,39 @@ const DeviceDetailsScreen: React.FC = () => {
     <SafeAreaView className="flex-1 bg-gray-100">
       <ScrollView>
         {/* Header */}
-        <View className="bg-white p-4 border-b border-gray-200 flex-row items-center justify-between">
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            className="p-2 -ml-2">
-            <Text className="text-blue-600 text-base">Back</Text>
-          </TouchableOpacity>
-          <Text className="text-lg font-bold text-center flex-1">
-            Device Details
-          </Text>
-          <View style={{width: 50}} />
-        </View>
+        <Header
+          title="Device Details"
+          showBackButton={true}
+          onBackPress={() => navigation.goBack()}
+        />
 
         {/* Device Info Section */}
-        <View className="bg-white p-4 m-4 rounded-lg shadow-sm">
-          <Text className="text-lg font-bold mb-4 text-gray-800">
-            Device Information
-          </Text>
-
-          <View className="mb-4">
-            <Text className="text-sm text-gray-500 mb-1">Device ID</Text>
-            <Text className="text-base font-medium">{device.id}</Text>
-          </View>
-
-          <View className="mb-4">
-            <Text className="text-sm text-gray-500 mb-1">Name</Text>
-            <TextInput
-              className="border border-gray-300 rounded-lg p-2 text-base bg-white"
-              value={deviceName}
-              onChangeText={setDeviceName}
-              onBlur={saveDeviceName}
-              placeholder="Enter device name"
-            />
-          </View>
-
-          <View className="mb-4">
-            <Text className="text-sm text-gray-500 mb-1">Battery Level</Text>
-            <Text className="text-base">
-              {formatBatteryLevel(device.batteryLevel)}
-            </Text>
-          </View>
-
-          <View className="mb-4">
-            <Text className="text-sm text-gray-500 mb-1">Last Seen</Text>
-            <Text className="text-base">{formatLastSeen(device.lastSeen)}</Text>
-          </View>
-        </View>
+        <DeviceInfoCard
+          device={device}
+          deviceName={deviceName}
+          setDeviceName={setDeviceName}
+          saveDeviceName={saveDeviceName}
+          formatBatteryLevel={formatBatteryLevel}
+          formatLastSeen={formatLastSeen}
+        />
 
         {/* Audio Assignment Section */}
-        <View className="bg-white p-4 m-4 rounded-lg shadow-sm">
-          <Text className="text-lg font-bold mb-4 text-gray-800">
-            Assigned Audio
-          </Text>
-
-          {audioFiles.length === 0 ? (
-            <View className="py-4 items-center">
-              <Text className="text-gray-500 mb-2">
-                No audio files available
-              </Text>
-              <TouchableOpacity
-                className="bg-blue-600 p-3 rounded-lg"
-                onPress={() => navigation.navigate('AudioFiles')}>
-                <Text className="text-white font-bold">Add Audio Files</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <>
-              <Text className="text-sm text-gray-500 mb-2">
-                Selected Audio File
-              </Text>
-
-              <View className="mb-4 border border-gray-200 rounded-lg">
-                {audioFiles.map((file: AudioFile) => (
-                  <TouchableOpacity
-                    key={file.id}
-                    className={`p-4 border-b border-gray-200 flex-row justify-between items-center ${
-                      selectedFileId === file.id ? 'bg-blue-50' : 'bg-white'
-                    }`}
-                    onPress={() => assignAudioFile(file.id)}>
-                    <Text
-                      className={`${
-                        selectedFileId === file.id
-                          ? 'font-bold text-blue-600'
-                          : 'text-gray-800'
-                      }`}>
-                      {file.title}
-                    </Text>
-                    {selectedFileId === file.id && (
-                      <Text className="text-blue-600">✓</Text>
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {selectedFileId && (
-                <View className="flex-row mb-4">
-                  <TouchableOpacity
-                    className="flex-1 mr-2 bg-green-600 p-3 rounded-lg"
-                    onPress={testAudio}>
-                    <Text className="text-white text-center font-bold">
-                      Play Sound
-                    </Text>
-                  </TouchableOpacity>
-
-                  {isPlaying && (
-                    <TouchableOpacity
-                      className="flex-1 ml-2 bg-red-600 p-3 rounded-lg"
-                      onPress={stopAudio}>
-                      <Text className="text-white text-center font-bold">
-                        Stop Sound
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              )}
-            </>
-          )}
-        </View>
+        <AudioAssignmentCard
+          audioFiles={audioFiles}
+          selectedFileId={selectedFileId}
+          assignAudioFile={assignAudioFile}
+          testAudio={testAudio}
+          stopAudio={stopAudio}
+          isPlaying={isPlaying}
+          navigateToAudioFiles={() => navigation.navigate('AudioFiles')}
+        />
 
         {/* Danger Zone */}
-        <View className="bg-white p-4 m-4 rounded-lg shadow-sm">
-          <Text className="text-lg font-bold mb-4 text-red-600">
-            Danger Zone
-          </Text>
-
-          <TouchableOpacity
-            className="bg-red-600 p-3 rounded-lg"
-            onPress={deleteDevice}>
-            <Text className="text-white text-center font-bold">
-              Remove Device
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <DangerZoneCard
+          title="Danger Zone"
+          actionLabel="Remove Device"
+          onAction={deleteDevice}
+        />
       </ScrollView>
     </SafeAreaView>
   );
