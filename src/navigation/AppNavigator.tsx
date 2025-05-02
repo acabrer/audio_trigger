@@ -1,3 +1,6 @@
+// This file defines the main navigation structure of the app using React Navigation.
+// It includes the stack navigator and the screens that will be used in the app.
+
 import React from 'react';
 import {NavigationContainer} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';

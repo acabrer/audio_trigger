@@ -1,5 +1,3 @@
-// src/services/storage.ts
-
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Define app settings type

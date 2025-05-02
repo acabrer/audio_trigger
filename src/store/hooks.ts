@@ -1,4 +1,4 @@
-// src/store/hooks.ts
+// This file contains custom hooks for using Redux in a TypeScript application.
 
 import {TypedUseSelectorHook, useDispatch, useSelector} from 'react-redux';
 import type {RootState, AppDispatch} from './index';

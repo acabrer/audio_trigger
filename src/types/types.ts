@@ -1,4 +1,5 @@
-// types.ts
+// This file contains TypeScript types and interfaces for the application.
+// It includes types for navigation, ESP devices, audio files, and settings.
 
 // Navigation types
 export type RootStackParamList = {

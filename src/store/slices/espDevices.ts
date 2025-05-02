@@ -1,4 +1,4 @@
-// src/store/slices/espDevices.ts
+// Redux slice for managing ESP devices
 
 import {createSlice, PayloadAction} from '@reduxjs/toolkit';
 import {ESPDevice} from '../../services/storage';

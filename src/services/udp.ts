@@ -1,5 +1,3 @@
-// src/services/udp.ts
-
 import {useState, useEffect, useRef} from 'react';
 import UDPSocket from 'react-native-udp';
 import {Buffer} from 'buffer';

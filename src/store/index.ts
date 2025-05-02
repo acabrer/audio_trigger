@@ -1,4 +1,4 @@
-// src/store/index.ts
+// Redux store configuration
 
 import {configureStore} from '@reduxjs/toolkit';
 import espDevicesReducer from './slices/espDevices';

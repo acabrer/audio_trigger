@@ -1,4 +1,4 @@
-// src/store/slices/audioFiles.ts
+// Audio files slice for Redux store
 
 import {createSlice, PayloadAction} from '@reduxjs/toolkit';
 import {AudioFile} from '../../services/audio';

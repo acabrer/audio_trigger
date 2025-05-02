@@ -1,4 +1,4 @@
-// src/store/slices/settings.ts
+// Description: Redux slice for managing app settings, including UDP port, auto-start listener, max volume, dark mode, and last connected devices.
 
 import {createSlice, PayloadAction} from '@reduxjs/toolkit';
 import {AppSettings} from '../../services/storage';

@@ -1,5 +1,3 @@
-// src/services/bluetooth.ts
-
 import {Platform, PermissionsAndroid} from 'react-native';
 import {BleManager, Device} from 'react-native-ble-plx';
 import {EventEmitter} from 'events';
