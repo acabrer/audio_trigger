@@ -268,10 +268,21 @@ const HomeScreen: React.FC = () => {
   // Find audio file for device
   const getDeviceAudioFile = useCallback(
     (deviceId: string) => {
+      // Use files from the selector which will be up-to-date
       return files.find(file => file.deviceId === deviceId);
     },
-    [files],
+    [files], // Keep files in dependencies to update when files change
   );
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      console.log('Home screen focused - forcing UI refresh');
+      // Incrementing this will cause the FlatList to re-render with fresh data
+      setDeviceUpdateCount(prevCount => prevCount + 1);
+    });
+
+    return unsubscribe;
+  }, [navigation]);
 
   // Memoize the render function to prevent recreating on every render
   const renderDeviceItem = useCallback(
@@ -462,11 +473,8 @@ const HomeScreen: React.FC = () => {
             keyExtractor={keyExtractor}
             contentContainerStyle={{paddingBottom: 16}}
             ListEmptyComponent={ListEmptyComponent}
-            extraData={[
-              deviceUpdateCount,
-              playingDevices,
-              files,
-            ]} /* Include files in extraData */
+            extraData={[deviceUpdateCount, playingDevices, files]}
+            key={deviceUpdateCount.toString()} /* Include files in extraData */
           />
         )}
       </View>

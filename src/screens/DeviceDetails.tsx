@@ -14,6 +14,7 @@ import {useAppDispatch, useAppSelector} from '../store/hooks';
 import {updateDevice, removeDevice} from '../store/slices/espDevices';
 import AudioService from '../services/audio';
 import {AudioFile} from '../services/audio';
+import {setFiles} from '../store/slices/audioFiles';
 
 type DeviceDetailsScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -105,10 +106,19 @@ const DeviceDetailsScreen: React.FC = () => {
   const assignAudioFile = async (fileId: string) => {
     if (fileId) {
       setSelectedFileId(fileId);
-      await AudioService.mapFileToDevice(fileId, deviceId);
+      const success = await AudioService.mapFileToDevice(fileId, deviceId);
+
+      if (success) {
+        // After mapping is successful, reload the updated audio files
+        const updatedFiles = await AudioService.loadAudioFiles();
+
+        // Update Redux store with the new files that have the correct mapping
+        dispatch(setFiles(updatedFiles));
+
+        console.log('Audio file mapping updated in Redux store');
+      }
     }
   };
-
   // Test audio playback
   const testAudio = () => {
     AudioService.playAudioForDevice(deviceId);
