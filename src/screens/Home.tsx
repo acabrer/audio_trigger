@@ -1,14 +1,10 @@
-// src/screens/Home.tsx
-
-import React, {useEffect, useState, useCallback, useMemo} from 'react';
+import React, {useEffect, useState, useCallback} from 'react';
 import {
   View,
-  Text,
   TouchableOpacity,
-  FlatList,
   SafeAreaView,
   StatusBar,
-  ActivityIndicator,
+  Text,
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
@@ -19,6 +15,15 @@ import AudioService from '../services/audio';
 import {RootStackParamList} from '../types/types';
 import {ESPDevice} from '../services/storage';
 import {setFiles} from '../store/slices/audioFiles';
+
+// Import our new components
+import Header from '../components/Header';
+import UDPStatusCard from '../components/UDPStatusCard';
+import DeviceList from '../components/devices/DeviceList';
+import PlayingAudioBanner from '../components/audio/PlayingAudioBanner';
+import LoopingFilesSection from '../components/audio/LoopingFilesSection';
+import FooterNavigation from '../components/FooterNavigation';
+import LastMessageCard from '../components/devices/LastMessageCard';
 
 type HomeScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -312,254 +317,86 @@ const HomeScreen: React.FC = () => {
     return unsubscribe;
   }, [navigation]);
 
-  // Memoize the render function to prevent recreating on every render
-  const renderDeviceItem = useCallback(
-    ({item}: {item: ESPDevice}) => {
-      const audioFile = getDeviceAudioFile(item.id);
-      const devicePlaying = isDevicePlaying(item.id);
-
-      return (
-        <TouchableOpacity
-          className="flex-row bg-white mb-3 p-4 rounded-lg shadow"
-          onPress={() =>
-            navigation.navigate('DeviceDetails', {deviceId: item.id})
-          }>
-          <View className="flex-1">
-            <Text className="text-base font-bold mb-1 text-gray-800">
-              {item.name}
-            </Text>
-            <Text className="text-sm text-gray-500 mb-1">
-              {getDeviceStatus(item.id)}
-            </Text>
-            {audioFile ? (
-              <Text
-                className={`text-sm ${
-                  devicePlaying ? 'text-green-600 font-bold' : 'text-blue-600'
-                }`}>
-                Audio: {audioFile.title} {devicePlaying ? '(Playing)' : ''}
-              </Text>
-            ) : (
-              <Text className="text-sm text-orange-600">No audio assigned</Text>
-            )}
-          </View>
-          <View className="flex-row">
-            {devicePlaying ? (
-              <TouchableOpacity
-                className="bg-red-600 px-4 py-2 rounded-lg self-center mr-2"
-                onPress={() => stopDeviceAudio(item.id)}>
-                <Text className="text-white font-bold">Stop</Text>
-              </TouchableOpacity>
-            ) : (
-              audioFile && (
-                <TouchableOpacity
-                  className="bg-blue-600 px-4 py-2 rounded-lg self-center mr-2"
-                  onPress={() => testAudio(item.id)}>
-                  <Text className="text-white font-bold">Play</Text>
-                </TouchableOpacity>
-              )
-            )}
-            <TouchableOpacity
-              className="bg-gray-600 px-4 py-2 rounded-lg self-center"
-              onPress={() =>
-                navigation.navigate('DeviceDetails', {deviceId: item.id})
-              }>
-              <Text className="text-white font-bold">Details</Text>
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
-      );
+  const navigateToDeviceDetails = useCallback(
+    (deviceId: string) => {
+      navigation.navigate('DeviceDetails', {deviceId});
     },
-    [
-      getDeviceAudioFile,
-      getDeviceStatus,
-      navigation,
-      testAudio,
-      stopDeviceAudio,
-      isDevicePlaying,
-    ],
+    [navigation],
   );
 
-  // Render looping files section
-  const renderLoopingFilesSection = useCallback(() => {
-    // If no files are looping, don't render this section
-    if (loopingFiles.length === 0) {
-      return null;
-    }
-
-    // Get the file objects that are looping
-    const loopingFileObjects = files.filter(file =>
-      loopingFiles.includes(file.id),
-    );
-
-    return (
-      <View className="bg-green-50 p-3 mx-4 mt-2 mb-4 rounded-lg">
-        <View className="flex-row justify-between items-center mb-2">
-          <Text className="text-green-800 font-bold">Looping Audio Files:</Text>
-          <TouchableOpacity
-            className="bg-red-600 px-3 py-1 rounded"
-            onPress={stopAllLoops}>
-            <Text className="text-white font-bold">Stop All Loops</Text>
-          </TouchableOpacity>
-        </View>
-
-        {loopingFileObjects.map(file => (
-          <View
-            key={file.id}
-            className="flex-row justify-between items-center mt-1">
-            <Text className="text-green-800">♫ {file.title}</Text>
-            <TouchableOpacity
-              className="bg-red-600 px-2 py-1 rounded"
-              onPress={() => AudioService.stopLoopPlayback(file.id)}>
-              <Text className="text-white text-xs">Stop</Text>
-            </TouchableOpacity>
-          </View>
-        ))}
-      </View>
-    );
-  }, [loopingFiles, files, stopAllLoops]);
-
-  // Memoize the list key extractor
-  const keyExtractor = useCallback((item: ESPDevice) => item.id, []);
-
-  // Memoize the list empty component
-  const ListEmptyComponent = useMemo(
-    () => (
-      <View className="p-8 items-center justify-center bg-gray-200 rounded-lg">
-        <Text className="text-center text-gray-600 leading-6">
-          No ESP devices found. Make sure your devices are powered on and
-          connected to the same network.
-        </Text>
-      </View>
-    ),
-    [],
-  );
+  const onStopButtonAudio = useCallback((fileId: string) => {
+    AudioService.stopLoopPlayback(fileId);
+  }, []);
 
   return (
     <SafeAreaView className="flex-1 bg-gray-100">
       <StatusBar barStyle="dark-content" />
 
-      <View className="flex-row justify-between items-center p-4 border-b border-gray-200">
-        <Text className="text-xl font-bold text-gray-900">
-          ESP Audio Trigger
-        </Text>
-        <View className="flex-row">
-          {/* Only show Stop All button if sounds are playing */}
-          {(playingDevices.length > 0 || loopingFiles.length > 0) && (
-            <TouchableOpacity
-              className="px-4 py-2 mr-2 rounded-lg bg-red-600"
-              onPress={stopAllAudio}>
-              <Text className="text-white font-bold">Stop All</Text>
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity
-            className={`px-4 py-2 rounded-lg ${
-              isListening ? 'bg-green-600' : 'bg-gray-600'
-            }`}
-            onPress={toggleListener}
-            disabled={isLoading}>
-            <Text className="text-white font-bold">
-              {isLoading ? (
-                <ActivityIndicator size="small" color="#ffffff" />
-              ) : isListening ? (
-                'Listening'
-              ) : (
-                'Start Listening'
-              )}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+      {/* App Header with toggle listener button */}
+      <Header
+        title="ESP Audio Trigger"
+        rightAction={
+          playingDevices.length > 0 || loopingFiles.length > 0
+            ? stopAllAudio
+            : toggleListener
+        }
+        rightActionTitle={
+          playingDevices.length > 0 || loopingFiles.length > 0
+            ? 'Stop All'
+            : isListening
+            ? 'Listening'
+            : 'Start Listening'
+        }
+        rightActionColor={
+          playingDevices.length > 0 || loopingFiles.length > 0
+            ? '#e53e3e'
+            : isListening
+            ? '#48bb78'
+            : '#718096'
+        }
+      />
 
-      {/* Now Playing Banner - show if sounds are playing */}
-      {playingDevices.length > 0 && (
-        <View className="bg-green-100 p-3 mx-4 mt-2 rounded-lg">
-          <Text className="text-green-800 font-bold">Now Playing:</Text>
-          {playingDevices.map(deviceId => {
-            const device = devices.find(d => d.id === deviceId);
-            const audioFile = files.find(f => f.deviceId === deviceId);
-            return (
-              <View
-                key={deviceId}
-                className="flex-row justify-between items-center mt-1">
-                <Text className="text-green-800">
-                  {device?.name || `Device ${deviceId}`}:{' '}
-                  {audioFile?.title || 'Unknown'}
-                </Text>
-                <TouchableOpacity
-                  className="bg-red-600 px-2 py-1 rounded"
-                  onPress={() => stopDeviceAudio(deviceId)}>
-                  <Text className="text-white text-xs">Stop</Text>
-                </TouchableOpacity>
-              </View>
-            );
-          })}
-        </View>
-      )}
+      {/* Now Playing Banner */}
+      <PlayingAudioBanner
+        playingDevices={playingDevices}
+        devices={devices}
+        audioFiles={files}
+        onStopDeviceAudio={stopDeviceAudio}
+      />
 
-      {/* Looping files section */}
-      {renderLoopingFilesSection()}
+      {/* Looping Files Section */}
+      <LoopingFilesSection
+        loopingFiles={loopingFiles}
+        files={files}
+        onStopAllLoops={stopAllLoops}
+        onStopLoop={onStopButtonAudio}
+      />
 
-      {/* Port information */}
-      <View className="bg-blue-50 p-3 mx-4 mt-2 rounded-lg">
-        <Text className="text-blue-800">UDP Port: {udpPort}</Text>
-        <Text className="text-blue-800">
-          Status: {isListening ? 'Listening for ESP devices' : 'Not listening'}
-        </Text>
-      </View>
+      {/* UDP Status Card */}
+      <UDPStatusCard port={udpPort} isListening={isListening} error={error} />
 
-      {error && (
-        <View className="bg-red-100 p-3 mx-4 mt-2 rounded-lg">
-          <Text className="text-red-800">Error: {error}</Text>
-        </View>
-      )}
+      {/* Last Message Card */}
+      <LastMessageCard lastMessage={lastMessage} />
 
-      {/* Last message info */}
-      {lastMessage && (
-        <View className="bg-green-50 p-3 mx-4 mt-2 mb-4 rounded-lg">
-          <Text className="text-green-800 font-bold">Last Message:</Text>
-          <Text className="text-green-800">
-            Device: {lastMessage.deviceId}, Button:{' '}
-            {lastMessage.buttonPressed ? 'Pressed' : 'Released'}
-          </Text>
-          <Text className="text-green-800">
-            Time: {new Date(lastMessage.timestamp).toLocaleTimeString()}
-          </Text>
-        </View>
-      )}
+      {/* Device List */}
+      <DeviceList
+        devices={devices}
+        audioFiles={files}
+        playingDevices={playingDevices}
+        isLoading={isLoading}
+        onStopAudio={stopDeviceAudio}
+        onPlayAudio={testAudio}
+        onViewDetails={navigateToDeviceDetails}
+        getDeviceStatus={getDeviceStatus}
+        getDeviceAudioFile={getDeviceAudioFile}
+        isDevicePlaying={isDevicePlaying}
+      />
 
-      <View className="flex-1 p-4">
-        <Text className="text-lg font-bold mb-4 text-gray-800">
-          Connected ESP Devices
-        </Text>
-        {isLoading ? (
-          <View className="items-center justify-center p-4">
-            <ActivityIndicator size="large" color="#3498db" />
-            <Text className="text-gray-600 mt-2">Initializing services...</Text>
-          </View>
-        ) : (
-          <FlatList
-            data={devices}
-            renderItem={renderDeviceItem}
-            keyExtractor={keyExtractor}
-            contentContainerStyle={{paddingBottom: 16}}
-            ListEmptyComponent={ListEmptyComponent}
-            extraData={[deviceUpdateCount, playingDevices, loopingFiles, files]}
-          />
-        )}
-      </View>
-
-      <View className="flex-row border-t border-gray-200 p-4">
-        <TouchableOpacity
-          className="flex-1 bg-gray-800 p-4 rounded-lg mx-2 items-center"
-          onPress={() => navigation.navigate('AudioFiles')}>
-          <Text className="text-white font-bold">Manage Audio Files</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          className="flex-1 bg-gray-800 p-4 rounded-lg mx-2 items-center"
-          onPress={() => navigation.navigate('Settings')}>
-          <Text className="text-white font-bold">Settings</Text>
-        </TouchableOpacity>
-      </View>
+      {/* Footer Navigation */}
+      <FooterNavigation
+        onManageAudioPress={() => navigation.navigate('AudioFiles')}
+        onSettingsPress={() => navigation.navigate('Settings')}
+      />
     </SafeAreaView>
   );
 };
