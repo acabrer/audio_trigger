@@ -18,6 +18,7 @@ import UDPService, {ESPMessage, useUDPListener} from '../services/udp';
 import AudioService from '../services/audio';
 import {RootStackParamList} from '../types/types';
 import {ESPDevice} from '../services/storage';
+import {setFiles} from '../store/slices/audioFiles';
 
 type HomeScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -41,26 +42,37 @@ const HomeScreen: React.FC = () => {
   const [deviceUpdateCount, setDeviceUpdateCount] = useState(0);
   // Track active sounds
   const [playingDevices, setPlayingDevices] = useState<string[]>([]);
+  // Track looping files
+  const [loopingFiles, setLoopingFiles] = useState<string[]>([]);
 
   // Use the UDP listener hook with stable references
   const {isListening, startListener, stopListener, error} = useUDPListener();
 
-  // Check for active sounds periodically
+  // Check for active sounds and looping files periodically
   useEffect(() => {
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
+      // Check for playing devices
       const currentPlaying = AudioService.getPlayingDevices();
-
-      // Only update state if the playing devices have changed
       if (
         JSON.stringify(currentPlaying.sort()) !==
         JSON.stringify(playingDevices.sort())
       ) {
         setPlayingDevices(currentPlaying);
       }
+
+      // Check for looping files
+      const loopingFilesResult = await AudioService.getLoopingFiles();
+      const loopingFileIds = loopingFilesResult.map(file => file.id);
+      if (
+        JSON.stringify(loopingFileIds.sort()) !==
+        JSON.stringify(loopingFiles.sort())
+      ) {
+        setLoopingFiles(loopingFileIds);
+      }
     }, 500);
 
     return () => clearInterval(interval);
-  }, [playingDevices]);
+  }, [playingDevices, loopingFiles]);
 
   // Handle ESP button press - debounce device updates
   const handleESPMessage = useCallback(
@@ -159,6 +171,16 @@ const HomeScreen: React.FC = () => {
             }
           }, 500);
         }
+
+        // Load and restore any looping files from previous session
+        const audioFiles = await AudioService.loadAudioFiles();
+        dispatch(setFiles(audioFiles));
+
+        // Restart any files that should be looping
+        const filesToLoop = audioFiles.filter(file => file.loopMode);
+        for (const file of filesToLoop) {
+          await AudioService.startLoopPlayback(file.id);
+        }
       } catch (err) {
         console.error('Error during initialization:', err);
       } finally {
@@ -209,6 +231,14 @@ const HomeScreen: React.FC = () => {
     console.log('Stopping all audio from Home screen');
     AudioService.stopPlayback();
     setPlayingDevices([]);
+    setLoopingFiles([]);
+  }, []);
+
+  // Stop all looping files
+  const stopAllLoops = useCallback(async () => {
+    console.log('Stopping all looping audio files');
+    await AudioService.stopAllLoops();
+    setLoopingFiles([]);
   }, []);
 
   // Function to stop audio for a specific device
@@ -268,16 +298,14 @@ const HomeScreen: React.FC = () => {
   // Find audio file for device
   const getDeviceAudioFile = useCallback(
     (deviceId: string) => {
-      // Use files from the selector which will be up-to-date
       return files.find(file => file.deviceId === deviceId);
     },
-    [files], // Keep files in dependencies to update when files change
+    [files],
   );
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
       console.log('Home screen focused - forcing UI refresh');
-      // Incrementing this will cause the FlatList to re-render with fresh data
       setDeviceUpdateCount(prevCount => prevCount + 1);
     });
 
@@ -351,6 +379,45 @@ const HomeScreen: React.FC = () => {
     ],
   );
 
+  // Render looping files section
+  const renderLoopingFilesSection = useCallback(() => {
+    // If no files are looping, don't render this section
+    if (loopingFiles.length === 0) {
+      return null;
+    }
+
+    // Get the file objects that are looping
+    const loopingFileObjects = files.filter(file =>
+      loopingFiles.includes(file.id),
+    );
+
+    return (
+      <View className="bg-green-50 p-3 mx-4 mt-2 mb-4 rounded-lg">
+        <View className="flex-row justify-between items-center mb-2">
+          <Text className="text-green-800 font-bold">Looping Audio Files:</Text>
+          <TouchableOpacity
+            className="bg-red-600 px-3 py-1 rounded"
+            onPress={stopAllLoops}>
+            <Text className="text-white font-bold">Stop All Loops</Text>
+          </TouchableOpacity>
+        </View>
+
+        {loopingFileObjects.map(file => (
+          <View
+            key={file.id}
+            className="flex-row justify-between items-center mt-1">
+            <Text className="text-green-800">♫ {file.title}</Text>
+            <TouchableOpacity
+              className="bg-red-600 px-2 py-1 rounded"
+              onPress={() => AudioService.stopLoopPlayback(file.id)}>
+              <Text className="text-white text-xs">Stop</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+      </View>
+    );
+  }, [loopingFiles, files, stopAllLoops]);
+
   // Memoize the list key extractor
   const keyExtractor = useCallback((item: ESPDevice) => item.id, []);
 
@@ -377,7 +444,7 @@ const HomeScreen: React.FC = () => {
         </Text>
         <View className="flex-row">
           {/* Only show Stop All button if sounds are playing */}
-          {playingDevices.length > 0 && (
+          {(playingDevices.length > 0 || loopingFiles.length > 0) && (
             <TouchableOpacity
               className="px-4 py-2 mr-2 rounded-lg bg-red-600"
               onPress={stopAllAudio}>
@@ -429,6 +496,9 @@ const HomeScreen: React.FC = () => {
         </View>
       )}
 
+      {/* Looping files section */}
+      {renderLoopingFilesSection()}
+
       {/* Port information */}
       <View className="bg-blue-50 p-3 mx-4 mt-2 rounded-lg">
         <Text className="text-blue-800">UDP Port: {udpPort}</Text>
@@ -473,8 +543,7 @@ const HomeScreen: React.FC = () => {
             keyExtractor={keyExtractor}
             contentContainerStyle={{paddingBottom: 16}}
             ListEmptyComponent={ListEmptyComponent}
-            extraData={[deviceUpdateCount, playingDevices, files]}
-            key={deviceUpdateCount.toString()} /* Include files in extraData */
+            extraData={[deviceUpdateCount, playingDevices, loopingFiles, files]}
           />
         )}
       </View>

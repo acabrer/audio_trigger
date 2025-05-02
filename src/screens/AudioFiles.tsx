@@ -7,11 +7,17 @@ import {
   SafeAreaView,
   ActivityIndicator,
   Alert,
+  Switch,
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
-import {addFile, removeFile, setFiles} from '../store/slices/audioFiles';
+import {
+  addFile,
+  removeFile,
+  setFiles,
+  updateFile,
+} from '../store/slices/audioFiles';
 import AudioService, {AudioFile} from '../services/audio';
 import {RootStackParamList} from '../types/types';
 // Simplified import with no unused types
@@ -32,16 +38,40 @@ const AudioFilesScreen: React.FC = () => {
 
   // Local state for UI
   const [isAdding, setIsAdding] = useState(false);
+  const [playingLoops, setPlayingLoops] = useState<Record<string, boolean>>({});
 
   // Load audio files when the component mounts
   useEffect(() => {
     const loadFiles = async () => {
       const audioFiles = await AudioService.loadAudioFiles();
       dispatch(setFiles(audioFiles));
+
+      // Check which files are currently playing in loop
+      const loopStatus: Record<string, boolean> = {};
+      audioFiles.forEach(file => {
+        loopStatus[file.id] =
+          AudioService.isDevicePlaying(file.id) && !!file.loopMode;
+      });
+      setPlayingLoops(loopStatus);
     };
 
     loadFiles();
-  }, [dispatch]);
+
+    // Set up a timer to check loop playback status
+    const intervalId = setInterval(() => {
+      files.forEach(file => {
+        const isPlaying = AudioService.isDevicePlaying(file.id);
+        setPlayingLoops(prev => {
+          if (prev[file.id] !== isPlaying && file.loopMode) {
+            return {...prev, [file.id]: isPlaying};
+          }
+          return prev;
+        });
+      });
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [dispatch, files]);
 
   // Pick an audio file using the document picker
   const pickAudioFile = async () => {
@@ -134,8 +164,47 @@ const AudioFilesScreen: React.FC = () => {
     );
   };
 
-  // Play an audio file to preview it
+  // Toggle loop playback for a file
+  const toggleLoopPlayback = async (file: AudioFile) => {
+    const fileId = file.id;
+    const isCurrentlyPlaying = playingLoops[fileId] || false;
+
+    if (isCurrentlyPlaying) {
+      // Stop the loop
+      const success = await AudioService.stopLoopPlayback(fileId);
+      if (success) {
+        setPlayingLoops(prev => ({...prev, [fileId]: false}));
+        // Update Redux store
+        dispatch(
+          updateFile({
+            id: fileId,
+            loopMode: false,
+          }),
+        );
+      }
+    } else {
+      // Start the loop
+      const success = await AudioService.startLoopPlayback(fileId);
+      if (success) {
+        setPlayingLoops(prev => ({...prev, [fileId]: true}));
+        // Update Redux store
+        dispatch(
+          updateFile({
+            id: fileId,
+            loopMode: true,
+          }),
+        );
+      }
+    }
+  };
+
+  // Play an audio file to preview it (non-looping)
   const handlePlayFile = async (file: AudioFile) => {
+    // If file is in loop mode, don't allow regular playback
+    if (playingLoops[file.id]) {
+      return;
+    }
+
     await AudioService.stopPlayback();
     await AudioService.playAudioForDevice(file.deviceId || '');
   };
@@ -156,11 +225,25 @@ const AudioFilesScreen: React.FC = () => {
         </Text>
 
         <View className="flex-row">
-          <TouchableOpacity
-            className="bg-blue-600 px-3 py-1 mr-2 rounded"
-            onPress={() => handlePlayFile(item)}>
-            <Text className="text-white font-medium">Play</Text>
-          </TouchableOpacity>
+          {/* Loop toggle switch */}
+          <View className="flex-row items-center mr-2">
+            <Text className="text-sm mr-2 text-gray-600">Loop</Text>
+            <Switch
+              value={playingLoops[item.id] || false}
+              onValueChange={() => toggleLoopPlayback(item)}
+              trackColor={{false: '#767577', true: '#4CAF50'}}
+              thumbColor={playingLoops[item.id] ? '#fff' : '#f4f3f4'}
+            />
+          </View>
+
+          {/* Only show Play button if not in loop mode */}
+          {!playingLoops[item.id] && (
+            <TouchableOpacity
+              className="bg-blue-600 px-3 py-1 mr-2 rounded"
+              onPress={() => handlePlayFile(item)}>
+              <Text className="text-white font-medium">Play</Text>
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             className="bg-red-600 px-3 py-1 rounded"
@@ -173,6 +256,13 @@ const AudioFilesScreen: React.FC = () => {
       <Text className="text-sm text-gray-500">
         Assigned to: {getDeviceName(item.deviceId)}
       </Text>
+
+      {/* Loop status indicator */}
+      {playingLoops[item.id] && (
+        <Text className="text-sm text-green-600 font-bold mt-1">
+          ♫ Playing in loop mode ♫
+        </Text>
+      )}
     </View>
   );
 

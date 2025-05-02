@@ -11,6 +11,7 @@ export interface AudioFile {
   url: string;
   title: string;
   deviceId?: string; // ESP device ID this audio is mapped to
+  loopMode?: boolean; // New flag to indicate if this file should loop
 }
 
 // Interface for active sounds
@@ -18,6 +19,7 @@ interface ActiveSound {
   id: string;
   deviceId: string;
   source: AudioBufferSourceNode;
+  isLooping?: boolean; // Flag to track if this sound is in loop mode
 }
 
 // Default directory for audio files
@@ -124,6 +126,7 @@ export const AudioService = {
         url: `file://${destinationPath}`,
         title,
         deviceId,
+        loopMode: false, // Default to not looping
       };
 
       // Load existing metadata
@@ -347,6 +350,120 @@ export const AudioService = {
     }
   },
 
+  // Start loop playback for a specific file
+  startLoopPlayback: async (fileId: string): Promise<boolean> => {
+    try {
+      if (!AudioService.audioContext) {
+        await AudioService.initialize();
+      }
+
+      const ctx = AudioService.audioContext!;
+
+      // Load audio files
+      const audioFiles = await AudioService.loadAudioFiles();
+      const file = audioFiles.find(f => f.id === fileId);
+
+      if (!file) {
+        console.error('Audio file not found for loop playback:', fileId);
+        return false;
+      }
+
+      console.log('Starting loop playback for:', file.title);
+
+      // Stop any existing playback of this file
+      AudioService.stopSound(fileId);
+
+      // Get or load the audio buffer
+      let buffer = AudioService.audioBuffers.get(fileId);
+      if (!buffer) {
+        const loadedBuffer = await AudioService.loadAudioBuffer(file.url);
+        buffer = loadedBuffer ?? undefined;
+        if (buffer) {
+          AudioService.audioBuffers.set(fileId, buffer);
+        } else {
+          console.error('Failed to load audio buffer for loop playback');
+          return false;
+        }
+      }
+
+      // Create a source node
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.loop = true; // Enable looping
+      source.start(0);
+
+      // Store the sound source with loop flag
+      AudioService.activeSounds.set(fileId, {
+        id: fileId,
+        deviceId: file.deviceId || 'loop', // Use 'loop' as a special deviceId
+        source,
+        isLooping: true,
+      });
+
+      // Update the file's loop mode status
+      const updatedFiles = audioFiles.map(f =>
+        f.id === fileId ? {...f, loopMode: true} : f,
+      );
+
+      // Save updated metadata
+      const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
+      await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
+
+      return true;
+    } catch (error) {
+      console.error('Failed to start loop playback:', error);
+      return false;
+    }
+  },
+
+  // Stop loop playback for a specific file
+  stopLoopPlayback: async (fileId: string): Promise<boolean> => {
+    try {
+      // Stop the sound
+      AudioService.stopSound(fileId);
+
+      // Load audio files
+      const audioFiles = await AudioService.loadAudioFiles();
+
+      // Update the file's loop mode status
+      const updatedFiles = audioFiles.map(f =>
+        f.id === fileId ? {...f, loopMode: false} : f,
+      );
+
+      // Save updated metadata
+      const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
+      await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
+
+      return true;
+    } catch (error) {
+      console.error('Failed to stop loop playback:', error);
+      return false;
+    }
+  },
+
+  // Get all files currently playing in loop mode
+  getLoopingFiles: async (): Promise<AudioFile[]> => {
+    try {
+      const audioFiles = await AudioService.loadAudioFiles();
+      const loopingFiles: AudioFile[] = [];
+
+      for (const file of audioFiles) {
+        const isPlaying = AudioService.isDevicePlaying(file.id);
+        const activeSound = AudioService.activeSounds.get(file.id);
+
+        if (isPlaying && activeSound?.isLooping) {
+          loopingFiles.push(file);
+        }
+      }
+
+      return loopingFiles;
+    } catch (error) {
+      console.error('Failed to get looping files:', error);
+      return [];
+    }
+  },
+
   // Stop a specific sound
   stopSound: (fileId: string): void => {
     try {
@@ -422,6 +539,23 @@ export const AudioService = {
     }
   },
 
+  // Stop all looping audio files
+  stopAllLoops: async (): Promise<void> => {
+    try {
+      // Get all files playing in loop mode
+      const loopingFiles = await AudioService.getLoopingFiles();
+
+      // Stop each one
+      for (const file of loopingFiles) {
+        await AudioService.stopLoopPlayback(file.id);
+      }
+
+      console.log('All loop playback stopped');
+    } catch (error) {
+      console.error('Failed to stop all loops:', error);
+    }
+  },
+
   // Check if any audio is playing
   isPlaying: (): boolean => {
     return AudioService.activeSounds.size > 0;
@@ -435,6 +569,11 @@ export const AudioService = {
       }
     }
     return false;
+  },
+
+  // Check if a specific file is playing
+  isFilePlaying: (fileId: string): boolean => {
+    return AudioService.activeSounds.has(fileId);
   },
 
   // Get all currently playing device IDs
