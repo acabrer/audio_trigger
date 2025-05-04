@@ -1,11 +1,5 @@
 import React, {useEffect, useState, useCallback} from 'react';
-import {
-  View,
-  TouchableOpacity,
-  SafeAreaView,
-  StatusBar,
-  Text,
-} from 'react-native';
+import {SafeAreaView, StatusBar} from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
@@ -13,7 +7,6 @@ import {addDevice, updateDevice} from '../store/slices/espDevices';
 import UDPService, {ESPMessage, useUDPListener} from '../services/udp';
 import AudioService from '../services/audio';
 import {RootStackParamList} from '../types/types';
-import {ESPDevice} from '../services/storage';
 import {setFiles} from '../store/slices/audioFiles';
 
 // Import our new components

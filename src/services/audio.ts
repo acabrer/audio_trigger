@@ -1,3 +1,4 @@
+// src/services/audio.ts (optimized but compatible)
 import {
   AudioContext,
   AudioBufferSourceNode,
@@ -36,9 +37,18 @@ export const AudioService = {
   // Store for active sounds - allows multiple sounds to play simultaneously
   activeSounds: new Map<string, ActiveSound>(),
 
+  // Flag to track initialization state
+  isInitialized: false,
+
   // Initialize the audio service
   initialize: async () => {
     try {
+      // Don't re-initialize if already initialized
+      if (AudioService.isInitialized) {
+        console.log('Audio service already initialized');
+        return true;
+      }
+
       // Create audio directory if it doesn't exist
       const dirExists = await RNFS.exists(AUDIO_DIRECTORY);
       if (!dirExists) {
@@ -51,9 +61,11 @@ export const AudioService = {
       }
 
       console.log('Audio service initialized with react-native-audio-api');
+      AudioService.isInitialized = true;
       return true;
     } catch (error) {
       console.error('Failed to initialize audio service:', error);
+      AudioService.isInitialized = false;
       return false;
     }
   },
@@ -61,6 +73,11 @@ export const AudioService = {
   // Load and return all saved audio files
   loadAudioFiles: async (): Promise<AudioFile[]> => {
     try {
+      // Ensure service is initialized
+      if (!AudioService.isInitialized) {
+        await AudioService.initialize();
+      }
+
       // Check if directory exists
       const dirExists = await RNFS.exists(AUDIO_DIRECTORY);
       if (!dirExists) {
@@ -106,6 +123,11 @@ export const AudioService = {
     deviceId?: string,
   ): Promise<AudioFile | null> => {
     try {
+      // Ensure service is initialized
+      if (!AudioService.isInitialized) {
+        await AudioService.initialize();
+      }
+
       // Create directory if it doesn't exist
       const dirExists = await RNFS.exists(AUDIO_DIRECTORY);
       if (!dirExists) {
@@ -246,14 +268,20 @@ export const AudioService = {
     }
   },
 
-  // Load and decode an audio file
+  // Load and decode an audio file with better error handling
   loadAudioBuffer: async (fileUrl: string): Promise<AudioBuffer | null> => {
     try {
-      if (!AudioService.audioContext) {
+      // Ensure service is initialized
+      if (!AudioService.isInitialized) {
         await AudioService.initialize();
       }
 
-      const ctx = AudioService.audioContext!;
+      if (!AudioService.audioContext) {
+        console.error('Audio context is not initialized');
+        return null;
+      }
+
+      const ctx = AudioService.audioContext;
 
       // Convert file:// URL to a usable format
       const filePath = fileUrl.replace('file://', '');
@@ -271,8 +299,13 @@ export const AudioService = {
       const arrayBuffer = bytes.buffer;
 
       // Decode the audio data
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-      return audioBuffer;
+      try {
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        return audioBuffer;
+      } catch (decodeError) {
+        console.error('Failed to decode audio data:', decodeError);
+        return null;
+      }
     } catch (error) {
       console.error('Failed to load audio buffer:', error);
       return null;
@@ -282,11 +315,17 @@ export const AudioService = {
   // Find and play audio for an ESP device - true multichannel support
   playAudioForDevice: async (deviceId: string): Promise<boolean> => {
     try {
-      if (!AudioService.audioContext) {
+      // Ensure service is initialized
+      if (!AudioService.isInitialized) {
         await AudioService.initialize();
       }
 
-      const ctx = AudioService.audioContext!;
+      if (!AudioService.audioContext) {
+        console.error('Audio context is not initialized');
+        return false;
+      }
+
+      const ctx = AudioService.audioContext;
       console.log('Playing audio for device:', deviceId);
 
       // Load audio files
@@ -308,6 +347,7 @@ export const AudioService = {
       // Get or load the audio buffer
       let buffer = AudioService.audioBuffers.get(audioFile.id);
       if (!buffer) {
+        console.log('Loading audio buffer from disk...');
         const loadedBuffer = await AudioService.loadAudioBuffer(audioFile.url);
         buffer = loadedBuffer ?? undefined;
         if (buffer) {
@@ -316,6 +356,8 @@ export const AudioService = {
           console.error('Failed to load audio buffer');
           return false;
         }
+      } else {
+        console.log('Using cached audio buffer');
       }
 
       // Stop any existing sound for this device
@@ -353,11 +395,17 @@ export const AudioService = {
   // Start loop playback for a specific file
   startLoopPlayback: async (fileId: string): Promise<boolean> => {
     try {
-      if (!AudioService.audioContext) {
+      // Ensure service is initialized
+      if (!AudioService.isInitialized) {
         await AudioService.initialize();
       }
 
-      const ctx = AudioService.audioContext!;
+      if (!AudioService.audioContext) {
+        console.error('Audio context is not initialized');
+        return false;
+      }
+
+      const ctx = AudioService.audioContext;
 
       // Load audio files
       const audioFiles = await AudioService.loadAudioFiles();
@@ -464,39 +512,48 @@ export const AudioService = {
     }
   },
 
-  // Stop a specific sound
+  // Stop a specific sound with better error handling
   stopSound: (fileId: string): void => {
     try {
       const activeSound = AudioService.activeSounds.get(fileId);
       if (activeSound) {
-        activeSound.source.stop(0);
-        AudioService.activeSounds.delete(fileId);
+        try {
+          activeSound.source.stop(0);
+        } catch (stopError) {
+          console.warn(`Error stopping sound ${fileId}:`, stopError);
+        } finally {
+          AudioService.activeSounds.delete(fileId);
+        }
       }
     } catch (error) {
       console.error(`Failed to stop sound ${fileId}:`, error);
+      // Still remove from active sounds even if there was an error
+      AudioService.activeSounds.delete(fileId);
     }
   },
 
-  // Stop all sounds for a specific device
+  // Stop all sounds for a specific device with better error handling
   stopDeviceAudio: (deviceId: string): void => {
     try {
-      // Find all sounds playing for this device
+      // Get all active sounds first to avoid modification during iteration
+      const soundsToStop = [];
+
       for (const [fileId, sound] of AudioService.activeSounds.entries()) {
         if (sound.deviceId === deviceId) {
-          try {
-            sound.source.stop(0);
-          } catch (err) {
-            console.error('Failed to stop sound source:', err);
-          }
-          AudioService.activeSounds.delete(fileId);
+          soundsToStop.push(fileId);
         }
+      }
+
+      // Now stop each sound
+      for (const fileId of soundsToStop) {
+        AudioService.stopSound(fileId);
       }
     } catch (error) {
       console.error(`Failed to stop device audio for ${deviceId}:`, error);
     }
   },
 
-  // Stop all playback - Fixed to properly handle all active sounds
+  // Stop all playback with improved error handling
   stopPlayback: async (): Promise<void> => {
     try {
       console.log(
@@ -504,23 +561,11 @@ export const AudioService = {
       );
 
       // Create a new array from the entries to avoid modification during iteration
-      const activeSoundsEntries = Array.from(
-        AudioService.activeSounds.entries(),
-      );
+      const activeSoundsEntries = Array.from(AudioService.activeSounds.keys());
 
       // Stop all active sounds
-      for (const [fileId, sound] of activeSoundsEntries) {
-        try {
-          console.log(
-            `Stopping sound with ID: ${fileId} for device: ${sound.deviceId}`,
-          );
-          sound.source.stop(0);
-          AudioService.activeSounds.delete(fileId);
-        } catch (err) {
-          console.error(`Error stopping sound ${fileId}:`, err);
-          // Still remove from active sounds even if there was an error
-          AudioService.activeSounds.delete(fileId);
-        }
+      for (const fileId of activeSoundsEntries) {
+        AudioService.stopSound(fileId);
       }
 
       // Double check that all sounds were stopped
@@ -599,6 +644,8 @@ export const AudioService = {
         AudioService.audioContext.close();
         AudioService.audioContext = null;
       }
+
+      AudioService.isInitialized = false;
     } catch (error) {
       console.error('Failed to clean up audio service:', error);
     }

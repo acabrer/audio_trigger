@@ -35,6 +35,10 @@ local.properties
 !debug.keystore
 .kotlin/
 
+# Android gradle
+android/app/esp-trigger.jks
+android/gradle.properties
+
 # node.js
 #
 node_modules/
