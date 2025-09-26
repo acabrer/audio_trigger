@@ -10,6 +10,7 @@ import {setFiles} from './store/slices/audioFiles';
 import {setDevices} from './store/slices/espDevices';
 import {setSettings} from './store/slices/settings';
 import StorageService from './services/storage';
+import ErrorBoundary from './components/ErrorBoundary';
 import '../global.css';
 
 function App(): React.JSX.Element {
@@ -30,16 +31,8 @@ function App(): React.JSX.Element {
         // Initialize Bluetooth service if available
         await BluetoothService.initialize();
 
-        // Start UDP listener if auto-start is enabled
-        if (settings.autoStartListener) {
-          // Wait for UDP service to be ready
-          setTimeout(() => {
-            // Check available methods on UDPService
-            if (typeof UDPService.initialize === 'function') {
-              // We already called initialize above, no need to do it again
-            }
-          }, 1000);
-        }
+        // Note: UDP auto-start is handled in Home screen after component mount
+        // This ensures proper UI state synchronization
 
         // Load saved ESP devices
         const devices = await StorageService.loadESPDevices();
@@ -65,10 +58,12 @@ function App(): React.JSX.Element {
   }, []);
 
   return (
-    <Provider store={store}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      <AppNavigator />
-    </Provider>
+    <ErrorBoundary>
+      <Provider store={store}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+        <AppNavigator />
+      </Provider>
+    </ErrorBoundary>
   );
 }
 

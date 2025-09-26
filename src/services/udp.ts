@@ -2,6 +2,8 @@ import {useState, useEffect, useRef} from 'react';
 import UDPSocket from 'react-native-udp';
 import {Buffer} from 'buffer';
 import StorageService from './storage';
+import UDPMessageValidator from './udpValidator';
+import Mutex from './udpMutex';
 
 // Define types for ESP messages
 export interface ESPMessage {
@@ -16,8 +18,53 @@ let globalIsListening = false;
 let globalSocket: any = null;
 let globalPort: number = 4210;
 const globalMessageHandlers: ((message: ESPMessage) => void)[] = [];
-let reconnectTimeout: NodeJS.Timeout | null = null;
+let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let isBindingOrClosing = false;
+
+// Mutex for atomic operations
+const udpMutex = new Mutex();
+
+// Exponential backoff for reconnection
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const BASE_DELAY = 1000; // 1 second
+
+const calculateBackoffDelay = (attempt: number): number => {
+  return Math.min(BASE_DELAY * Math.pow(2, attempt), 30000); // Max 30 seconds
+};
+
+const resetReconnectAttempts = () => {
+  reconnectAttempts = 0;
+};
+
+// Cleanup tracking for proper resource management
+const activeTimeouts = new Set<ReturnType<typeof setTimeout>>();
+const activeIntervals = new Set<ReturnType<typeof setInterval>>();
+
+// Helper to track timeouts
+const trackedSetTimeout = (callback: () => void, delay: number) => {
+  const timeout = setTimeout(() => {
+    activeTimeouts.delete(timeout);
+    callback();
+  }, delay);
+  activeTimeouts.add(timeout);
+  return timeout;
+};
+
+// Helper to track intervals
+const trackedSetInterval = (callback: () => void, delay: number) => {
+  const interval = setInterval(callback, delay);
+  activeIntervals.add(interval);
+  return interval;
+};
+
+// Clear all tracked timers
+const clearAllTimers = () => {
+  activeTimeouts.forEach(timeout => clearTimeout(timeout));
+  activeIntervals.forEach(interval => clearInterval(interval));
+  activeTimeouts.clear();
+  activeIntervals.clear();
+};
 
 // Function to parse incoming UDP messages from ESP devices
 const parseESPMessage = (message: Buffer): ESPMessage | null => {
@@ -93,6 +140,9 @@ const safelyCloseSocket = () => {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
   }
+
+  // Clear all tracked timers
+  clearAllTimers();
 };
 
 // Create a stable version of UDP listener hook that uses global state
@@ -101,7 +151,7 @@ export function useUDPListener() {
   const [isListening, setIsListening] = useState(globalIsListening);
   const [error, setError] = useState<string | null>(null);
   const [port, setPort] = useState<number>(globalPort);
-  const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const errorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load port from settings
   useEffect(() => {
@@ -126,7 +176,7 @@ export function useUDPListener() {
       clearTimeout(errorTimeoutRef.current);
     }
 
-    errorTimeoutRef.current = setTimeout(() => {
+    errorTimeoutRef.current = trackedSetTimeout(() => {
       setError(null);
     }, 5000);
   };
@@ -139,24 +189,24 @@ export function useUDPListener() {
       }
     };
 
-    const intervalId = setInterval(syncIsListening, 1000);
+    const intervalId = trackedSetInterval(syncIsListening, 1000);
 
     return () => {
       clearInterval(intervalId);
+      activeIntervals.delete(intervalId);
     };
   }, [isListening]);
 
   // Start the UDP listener
   const startListener = async () => {
-    // Don't allow multiple start operations
-    if (isBindingOrClosing || globalIsListening) {
-      console.log('Already listening or operation in progress');
-      return;
-    }
+    return udpMutex.runExclusive(async () => {
+      // Don't allow multiple start operations
+      if (globalIsListening) {
+        console.log('Already listening');
+        return;
+      }
 
-    isBindingOrClosing = true;
-
-    try {
+      try {
       // Clean up any existing socket first
       safelyCloseSocket();
 
@@ -211,39 +261,44 @@ export function useUDPListener() {
           globalIsListening = true;
           setIsListening(true);
           setError(null);
+          resetReconnectAttempts();
         }
-
-        isBindingOrClosing = false;
       });
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      console.error('Failed to start UDP listener:', errorMessage);
-      setErrorWithTimeout(`Failed to start UDP listener: ${errorMessage}`);
-      safelyCloseSocket();
-      globalIsListening = false;
-      setIsListening(false);
-      isBindingOrClosing = false;
-    }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        console.error('Failed to start UDP listener:', errorMessage);
+        setErrorWithTimeout(`Failed to start UDP listener: ${errorMessage}`);
+        safelyCloseSocket();
+        globalIsListening = false;
+        setIsListening(false);
+
+        // Attempt exponential backoff reconnection
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          const delay = calculateBackoffDelay(reconnectAttempts);
+          reconnectAttempts++;
+          console.log(`Attempting reconnection ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`);
+
+          trackedSetTimeout(async () => {
+            await startListener();
+          }, delay);
+        }
+      }
+    });
   };
 
   // Function to stop the listener
   const stopListener = () => {
-    // Don't allow multiple stop operations
-    if (isBindingOrClosing || !globalIsListening) {
-      console.log('Not listening or operation in progress');
-      return;
-    }
+    udpMutex.runExclusive(async () => {
+      if (!globalIsListening) {
+        console.log('Not listening');
+        return;
+      }
 
-    isBindingOrClosing = true;
-
-    safelyCloseSocket();
-    globalIsListening = false;
-    setIsListening(false);
-
-    // Reset the binding flag after a small delay
-    setTimeout(() => {
-      isBindingOrClosing = false;
-    }, 300);
+      safelyCloseSocket();
+      globalIsListening = false;
+      setIsListening(false);
+      resetReconnectAttempts();
+    });
   };
 
   // Clean up on unmount
@@ -375,7 +430,7 @@ export const UDPService = {
     safelyCloseSocket();
     globalIsListening = false;
 
-    setTimeout(() => {
+    trackedSetTimeout(() => {
       isBindingOrClosing = false;
     }, 300);
   },

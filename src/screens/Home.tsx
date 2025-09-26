@@ -1,4 +1,4 @@
-import React, {useEffect, useState, useCallback} from 'react';
+import React, {useEffect, useState, useCallback, useRef} from 'react';
 import {SafeAreaView, StatusBar} from 'react-native';
 import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
@@ -35,9 +35,9 @@ const HomeScreen: React.FC = () => {
   // Local state - use refs for values that shouldn't trigger rerenders
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [lastMessageTimestamp, setLastMessageTimestamp] = useState(0);
+  const [, setLastMessageTimestamp] = useState(0);
   const [lastMessage, setLastMessage] = useState<ESPMessage | null>(null);
-  const [deviceUpdateCount, setDeviceUpdateCount] = useState(0);
+  const [, setDeviceUpdateCount] = useState(0);
   // Track active sounds
   const [playingDevices, setPlayingDevices] = useState<string[]>([]);
   // Track looping files
@@ -117,7 +117,7 @@ const HomeScreen: React.FC = () => {
       // If button was pressed, play associated audio - now allows multiple sounds simultaneously
       if (message.buttonPressed) {
         console.log('Button was pressed, attempting to play audio...');
-        const success = await AudioService.playAudioForDevice(message.deviceId);
+        const success = await AudioService.playAudioForDevice(message.deviceId, files);
         if (!success) {
           console.log('No audio file associated with this device.');
         } else {
@@ -133,7 +133,7 @@ const HomeScreen: React.FC = () => {
         }
       }
     },
-    [devices, dispatch],
+    [devices, dispatch, files],
   );
 
   // Initialize services once and avoid re-initializing
@@ -149,12 +149,8 @@ const HomeScreen: React.FC = () => {
         await AudioService.initialize();
         console.log('Audio service initialized');
 
-        // Initialize UDP service
-        await UDPService.initialize();
-        console.log(
-          'UDP service initialized on port',
-          UDPService.getCurrentPort(),
-        );
+        // Don't initialize UDP service here - let the useUDPListener handle it
+        // This prevents duplicate sockets on the same port
 
         if (!mounted) return;
         setIsInitialized(true);
@@ -198,6 +194,10 @@ const HomeScreen: React.FC = () => {
   }, []); // Empty dependency array - only run once
 
   // Subscribe to UDP messages when initialized
+  // Using useRef to maintain stable subscription
+  const handleESPMessageRef = useRef(handleESPMessage);
+  handleESPMessageRef.current = handleESPMessage;
+
   useEffect(() => {
     if (!isInitialized) {
       return;
@@ -205,13 +205,15 @@ const HomeScreen: React.FC = () => {
 
     console.log('Subscribing to UDP messages');
 
-    // Subscribe to UDP messages
-    const unsubscribe = UDPService.subscribe(handleESPMessage);
+    // Subscribe to UDP messages with stable wrapper
+    const unsubscribe = UDPService.subscribe((msg: ESPMessage) => {
+      handleESPMessageRef.current(msg);
+    });
 
     return () => {
       unsubscribe();
     };
-  }, [isInitialized, handleESPMessage]);
+  }, [isInitialized]); // Only re-subscribe when initialized changes
 
   // Toggle UDP listener with stable reference
   const toggleListener = useCallback(() => {
@@ -269,7 +271,7 @@ const HomeScreen: React.FC = () => {
   // Function to test audio for a device
   const testAudio = useCallback(async (deviceId: string) => {
     console.log('Testing audio for device:', deviceId);
-    const success = await AudioService.playAudioForDevice(deviceId);
+    const success = await AudioService.playAudioForDevice(deviceId, files);
     if (!success) {
       console.log(
         'No audio file associated with this device or playback failed',
@@ -283,7 +285,7 @@ const HomeScreen: React.FC = () => {
         return prev;
       });
     }
-  }, []);
+  }, [files]);
 
   // Check if a device sound is playing
   const isDevicePlaying = useCallback(

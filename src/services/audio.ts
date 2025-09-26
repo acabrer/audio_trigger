@@ -5,6 +5,9 @@ import {
   AudioBuffer,
 } from 'react-native-audio-api';
 import RNFS from 'react-native-fs';
+import {Buffer} from 'buffer';
+import AudioBufferCache from './audioBufferCache';
+import {globalRetryManager, globalCircuitBreaker, globalHealthMonitor} from '../utils/errorRecovery';
 
 // Define types for audio files
 export interface AudioFile {
@@ -31,8 +34,8 @@ export const AudioService = {
   // Store the AudioContext instance
   audioContext: null as AudioContext | null,
 
-  // Map of loaded audio buffers by file ID
-  audioBuffers: new Map<string, AudioBuffer>(),
+  // Audio buffer cache with LRU eviction and memory management
+  audioBufferCache: new AudioBufferCache(50), // 50MB cache
 
   // Store for active sounds - allows multiple sounds to play simultaneously
   activeSounds: new Map<string, ActiveSound>(),
@@ -62,6 +65,12 @@ export const AudioService = {
 
       console.log('Audio service initialized with react-native-audio-api');
       AudioService.isInitialized = true;
+
+      // Register health check
+      globalHealthMonitor.registerHealthCheck('audio', async () => {
+        return AudioService.audioContext !== null && AudioService.isInitialized;
+      });
+
       return true;
     } catch (error) {
       console.error('Failed to initialize audio service:', error);
@@ -134,13 +143,66 @@ export const AudioService = {
         await RNFS.mkdir(AUDIO_DIRECTORY);
       }
 
+      // Handle different URI types (content://, file://, or direct paths)
+      let cleanSourceUri = sourceUri;
+      let isContentUri = false;
+
+      console.log('Original source URI:', sourceUri);
+
+      // Check if it's a content URI
+      if (cleanSourceUri.startsWith('content://')) {
+        isContentUri = true;
+        console.log('Handling content URI');
+      } else {
+        // Handle URI encoding issues for file URIs
+        if (cleanSourceUri.includes('%')) {
+          try {
+            cleanSourceUri = decodeURIComponent(cleanSourceUri);
+          } catch (e) {
+            console.warn('Could not decode URI, using as-is:', e);
+          }
+        }
+
+        // Remove file:// prefix if present for source
+        if (cleanSourceUri.startsWith('file://')) {
+          cleanSourceUri = cleanSourceUri.substring(7);
+        }
+      }
+
       // Generate unique ID for the file
       const fileId = Date.now().toString();
-      const fileName = `${fileId}.${sourceUri.split('.').pop()}`;
+
+      // Extract extension from title (preferred) or default to wav
+      let extension = 'wav'; // default for audio files
+      if (title && title.includes('.')) {
+        const titleParts = title.split('.');
+        extension = titleParts[titleParts.length - 1].toLowerCase();
+        console.log('Extension from title:', extension);
+      }
+
+      // Validate extension - only allow audio formats
+      const validExtensions = ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'];
+      if (!validExtensions.includes(extension)) {
+        extension = 'wav'; // fallback to wav
+      }
+
+      const fileName = `${fileId}.${extension}`;
       const destinationPath = `${AUDIO_DIRECTORY}/${fileName}`;
 
+      console.log('Destination path:', destinationPath);
+
+      // For content URIs, we can directly copy without existence check
+      // For file URIs, verify source file exists
+      if (!isContentUri) {
+        const sourceExists = await RNFS.exists(cleanSourceUri);
+        if (!sourceExists) {
+          throw new Error(`Source file does not exist: ${cleanSourceUri}`);
+        }
+      }
+
       // Copy file to app storage
-      await RNFS.copyFile(sourceUri, destinationPath);
+      // RNFS can handle both content:// and file:// URIs
+      await RNFS.copyFile(sourceUri, destinationPath); // Use original URI for copy
 
       // Create audio file metadata
       const newFile: AudioFile = {
@@ -191,7 +253,7 @@ export const AudioService = {
       }
 
       // Remove buffer from cache
-      AudioService.audioBuffers.delete(fileId);
+      AudioService.audioBufferCache.delete(fileId);
 
       // Update metadata
       const updatedFiles = existingFiles.filter(file => file.id !== fileId);
@@ -271,41 +333,42 @@ export const AudioService = {
   // Load and decode an audio file with better error handling
   loadAudioBuffer: async (fileUrl: string): Promise<AudioBuffer | null> => {
     try {
-      // Ensure service is initialized
-      if (!AudioService.isInitialized) {
-        await AudioService.initialize();
-      }
+      return await globalCircuitBreaker.execute(async () => {
+        // Ensure service is initialized
+        if (!AudioService.isInitialized) {
+          await AudioService.initialize();
+        }
 
-      if (!AudioService.audioContext) {
-        console.error('Audio context is not initialized');
-        return null;
-      }
+        if (!AudioService.audioContext) {
+          console.error('Audio context is not initialized');
+          return null;
+        }
 
-      const ctx = AudioService.audioContext;
+        const ctx = AudioService.audioContext;
 
-      // Convert file:// URL to a usable format
-      const filePath = fileUrl.replace('file://', '');
+        // Convert file:// URL to a usable format
+        const filePath = fileUrl.replace('file://', '');
 
-      // Read the file as binary data
-      const fileData = await RNFS.readFile(filePath, 'base64');
+        // Read the file as binary data
+        const fileData = await RNFS.readFile(filePath, 'base64');
 
-      // Convert base64 to ArrayBuffer
-      const binaryString = atob(fileData);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      const arrayBuffer = bytes.buffer;
+        // Convert base64 to ArrayBuffer
+        // React Native doesn't have atob, use Buffer from imports
+        const buffer = Buffer.from(fileData, 'base64');
+        const arrayBuffer = buffer.buffer.slice(
+          buffer.byteOffset,
+          buffer.byteOffset + buffer.byteLength,
+        );
 
-      // Decode the audio data
-      try {
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        return audioBuffer;
-      } catch (decodeError) {
-        console.error('Failed to decode audio data:', decodeError);
-        return null;
-      }
+        // Decode the audio data
+        try {
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+          return audioBuffer;
+        } catch (decodeError) {
+          console.error('Failed to decode audio data:', decodeError);
+          return null;
+        }
+      });
     } catch (error) {
       console.error('Failed to load audio buffer:', error);
       return null;
@@ -313,7 +376,7 @@ export const AudioService = {
   },
 
   // Find and play audio for an ESP device - true multichannel support
-  playAudioForDevice: async (deviceId: string): Promise<boolean> => {
+  playAudioForDevice: async (deviceId: string, audioFiles?: AudioFile[]): Promise<boolean> => {
     try {
       // Ensure service is initialized
       if (!AudioService.isInitialized) {
@@ -328,11 +391,11 @@ export const AudioService = {
       const ctx = AudioService.audioContext;
       console.log('Playing audio for device:', deviceId);
 
-      // Load audio files
-      const audioFiles = await AudioService.loadAudioFiles();
+      // Use provided files or load from storage
+      const files = audioFiles || await AudioService.loadAudioFiles();
 
       // Find audio mapped to this device
-      const audioFile = audioFiles.find(file => file.deviceId === deviceId);
+      const audioFile = files.find(file => file.deviceId === deviceId);
       if (!audioFile) {
         console.log(`No audio file mapped to device ${deviceId}`);
         return false;
@@ -345,13 +408,13 @@ export const AudioService = {
       );
 
       // Get or load the audio buffer
-      let buffer = AudioService.audioBuffers.get(audioFile.id);
+      let buffer = AudioService.audioBufferCache.get(audioFile.id);
       if (!buffer) {
         console.log('Loading audio buffer from disk...');
         const loadedBuffer = await AudioService.loadAudioBuffer(audioFile.url);
         buffer = loadedBuffer ?? undefined;
         if (buffer) {
-          AudioService.audioBuffers.set(audioFile.id, buffer);
+          AudioService.audioBufferCache.set(audioFile.id, buffer);
         } else {
           console.error('Failed to load audio buffer');
           return false;
@@ -422,12 +485,12 @@ export const AudioService = {
       AudioService.stopSound(fileId);
 
       // Get or load the audio buffer
-      let buffer = AudioService.audioBuffers.get(fileId);
+      let buffer = AudioService.audioBufferCache.get(fileId);
       if (!buffer) {
         const loadedBuffer = await AudioService.loadAudioBuffer(file.url);
         buffer = loadedBuffer ?? undefined;
         if (buffer) {
-          AudioService.audioBuffers.set(fileId, buffer);
+          AudioService.audioBufferCache.set(fileId, buffer);
         } else {
           console.error('Failed to load audio buffer for loop playback');
           return false;
@@ -630,14 +693,29 @@ export const AudioService = {
     return Array.from(devices);
   },
 
+  // Handle low memory warning
+  onLowMemory: () => {
+    try {
+      console.warn('Low memory warning - clearing audio cache');
+      AudioService.audioBufferCache.onLowMemory();
+    } catch (error) {
+      console.error('Failed to handle low memory warning:', error);
+    }
+  },
+
+  // Get cache statistics
+  getCacheStats: () => {
+    return AudioService.audioBufferCache.getStats();
+  },
+
   // Cleanup resources
   cleanup: () => {
     try {
       // Stop all sounds
       AudioService.stopPlayback();
 
-      // Clear buffers
-      AudioService.audioBuffers.clear();
+      // Destroy buffer cache (clears timers)
+      AudioService.audioBufferCache.destroy();
 
       // Close audio context
       if (AudioService.audioContext) {
