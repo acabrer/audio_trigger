@@ -15,6 +15,7 @@ export interface AudioFile {
   url: string;
   title: string;
   deviceId?: string; // ESP device ID this audio is mapped to
+  buttonId?: string; // Optional button ID for multi-button devices (ESP32)
   loopMode?: boolean; // New flag to indicate if this file should loop
 }
 
@@ -330,6 +331,77 @@ export const AudioService = {
     }
   },
 
+  // Map a file to a specific device button (ESP32 support)
+  mapFileToDeviceButton: async (
+    fileId: string,
+    deviceId: string,
+    buttonId: string
+  ): Promise<boolean> => {
+    try {
+      // Ensure service is initialized
+      if (!AudioService.isInitialized) {
+        await AudioService.initialize();
+      }
+
+      // Load existing files
+      const existingFiles = await AudioService.loadAudioFiles();
+
+      // Check if any other file is already mapped to this device+button combination
+      const previouslyMappedIndex = existingFiles.findIndex(
+        file => file.deviceId === deviceId && file.buttonId === buttonId && file.id !== fileId
+      );
+
+      // Find and update the file we want to map
+      const fileToMapIndex = existingFiles.findIndex(file => file.id === fileId);
+
+      if (fileToMapIndex === -1) {
+        console.error('File not found for mapping:', fileId);
+        return false;
+      }
+
+      // Create a new array with the updates
+      const updatedFiles = [...existingFiles];
+
+      // If another file was mapped to this device+button, clear its mapping
+      if (previouslyMappedIndex !== -1) {
+        console.log(
+          'Removing previous device+button mapping from file:',
+          updatedFiles[previouslyMappedIndex].title
+        );
+        updatedFiles[previouslyMappedIndex] = {
+          ...updatedFiles[previouslyMappedIndex],
+          deviceId: undefined,
+          buttonId: undefined,
+        };
+      }
+
+      // Update the target file with the new device ID and button ID
+      updatedFiles[fileToMapIndex] = {
+        ...updatedFiles[fileToMapIndex],
+        deviceId,
+        buttonId,
+      };
+
+      console.log(
+        'Mapped file to device+button:',
+        updatedFiles[fileToMapIndex].title,
+        'to device:',
+        deviceId,
+        'button:',
+        buttonId
+      );
+
+      // Save updated metadata
+      const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
+      await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
+
+      return true;
+    } catch (error) {
+      console.error('Failed to map file to device button:', error);
+      return false;
+    }
+  },
+
   // Load and decode an audio file with better error handling
   loadAudioBuffer: async (fileUrl: string): Promise<AudioBuffer | null> => {
     try {
@@ -376,7 +448,11 @@ export const AudioService = {
   },
 
   // Find and play audio for an ESP device - true multichannel support
-  playAudioForDevice: async (deviceId: string, audioFiles?: AudioFile[]): Promise<boolean> => {
+  playAudioForDevice: async (
+    deviceId: string,
+    audioFiles?: AudioFile[],
+    buttonId?: string
+  ): Promise<boolean> => {
     try {
       // Ensure service is initialized
       if (!AudioService.isInitialized) {
@@ -389,15 +465,30 @@ export const AudioService = {
       }
 
       const ctx = AudioService.audioContext;
-      console.log('Playing audio for device:', deviceId);
+      console.log('Playing audio for device:', deviceId, 'button:', buttonId);
 
       // Use provided files or load from storage
       const files = audioFiles || await AudioService.loadAudioFiles();
 
       // Find audio mapped to this device
-      const audioFile = files.find(file => file.deviceId === deviceId);
+      // For ESP32: match both deviceId AND buttonId
+      // For ESP8266: match only deviceId (buttonId will be undefined)
+      const audioFile = files.find(file => {
+        if (buttonId) {
+          // ESP32: must match both device and button
+          return file.deviceId === deviceId && file.buttonId === buttonId;
+        } else {
+          // ESP8266: match device only (and ensure no buttonId is set for backward compatibility)
+          return file.deviceId === deviceId && !file.buttonId;
+        }
+      });
+
       if (!audioFile) {
-        console.log(`No audio file mapped to device ${deviceId}`);
+        if (buttonId) {
+          console.log(`No audio file mapped to device ${deviceId}, button ${buttonId}`);
+        } else {
+          console.log(`No audio file mapped to device ${deviceId}`);
+        }
         return false;
       }
 

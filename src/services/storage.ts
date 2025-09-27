@@ -32,6 +32,8 @@ export interface ESPDevice {
   lastSeen?: number;
   batteryLevel?: number;
   audioFileId?: string;
+  deviceType?: 'ESP8266' | 'ESP32'; // Type of device (auto-detected)
+  buttonCount?: number; // Number of buttons for ESP32 devices
 }
 
 // Storage service for saving/loading app data

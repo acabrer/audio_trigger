@@ -19,6 +19,7 @@ import {setFiles} from '../store/slices/audioFiles';
 import Header from '../components/Header';
 import DeviceInfoCard from '../components/devices/DeviceInfoCard';
 import AudioAssignmentCard from '../components/devices/AudioAssignmentCard';
+import ESP32ButtonAssignment from '../components/devices/ESP32ButtonAssignment';
 import DangerZoneCard from '../components/common/DangerZoneCard';
 
 type DeviceDetailsScreenNavigationProp = NativeStackNavigationProp<
@@ -130,6 +131,23 @@ const DeviceDetailsScreen: React.FC = () => {
     AudioService.playAudioForDevice(deviceId);
   };
 
+  // Test audio playback for specific ESP32 button
+  const testButtonAudio = (buttonId: string) => {
+    AudioService.playAudioForDevice(deviceId, audioFiles, buttonId);
+  };
+
+  // Assign audio to specific ESP32 button
+  const assignAudioToButton = async (fileId: string, buttonId: string) => {
+    const success = await AudioService.mapFileToDeviceButton(fileId, deviceId, buttonId);
+
+    if (success) {
+      // Reload the updated audio files
+      const updatedFiles = await AudioService.loadAudioFiles();
+      dispatch(setFiles(updatedFiles));
+      console.log('ESP32 button audio mapping updated in Redux store');
+    }
+  };
+
   // Stop only this device's audio
   const stopAudio = () => {
     AudioService.stopDeviceAudio(deviceId);
@@ -180,16 +198,26 @@ const DeviceDetailsScreen: React.FC = () => {
           formatLastSeen={formatLastSeen}
         />
 
-        {/* Audio Assignment Section */}
-        <AudioAssignmentCard
-          audioFiles={audioFiles}
-          selectedFileId={selectedFileId}
-          assignAudioFile={assignAudioFile}
-          testAudio={testAudio}
-          stopAudio={stopAudio}
-          isPlaying={isPlaying}
-          navigateToAudioFiles={() => navigation.navigate('AudioFiles')}
-        />
+        {/* Audio Assignment Section - conditional rendering based on device type */}
+        {device.deviceType === 'ESP32' ? (
+          <ESP32ButtonAssignment
+            device={device}
+            audioFiles={audioFiles}
+            assignAudioToButton={assignAudioToButton}
+            testButtonAudio={testButtonAudio}
+            navigateToAudioFiles={() => navigation.navigate('AudioFiles')}
+          />
+        ) : (
+          <AudioAssignmentCard
+            audioFiles={audioFiles}
+            selectedFileId={selectedFileId}
+            assignAudioFile={assignAudioFile}
+            testAudio={testAudio}
+            stopAudio={stopAudio}
+            isPlaying={isPlaying}
+            navigateToAudioFiles={() => navigation.navigate('AudioFiles')}
+          />
+        )}
 
         {/* Danger Zone */}
         <DangerZoneCard

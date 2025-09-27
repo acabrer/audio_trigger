@@ -89,24 +89,37 @@ const HomeScreen: React.FC = () => {
       // Only update Redux store on button press or for new devices
       if (!existingDevice || message.buttonPressed) {
         if (existingDevice) {
-          // Update last seen timestamp and battery level
+          // Update last seen timestamp, battery level, and device type
           dispatch(
             updateDevice({
               id: message.deviceId,
               lastSeen: message.timestamp,
               batteryLevel: message.batteryLevel,
+              deviceType: message.deviceType,
+              // Update button count for ESP32 devices
+              buttonCount: message.deviceType === 'ESP32' && message.buttonId
+                ? Math.max(existingDevice.buttonCount || 0, parseInt(message.buttonId) || 0)
+                : existingDevice.buttonCount,
             }),
           );
           // Force a device list refresh but limit the frequency
           setDeviceUpdateCount(prev => prev + 1);
         } else {
           // Add new device
+          const deviceName = message.deviceType === 'ESP32'
+            ? `ESP32 Device ${message.deviceId}`
+            : `ESP Button ${message.deviceId}`;
+
           dispatch(
             addDevice({
               id: message.deviceId,
-              name: `ESP Button ${message.deviceId}`,
+              name: deviceName,
               lastSeen: message.timestamp,
               batteryLevel: message.batteryLevel,
+              deviceType: message.deviceType,
+              buttonCount: message.deviceType === 'ESP32' && message.buttonId
+                ? parseInt(message.buttonId) || 0
+                : undefined,
             }),
           );
           // Force a device list refresh
@@ -117,9 +130,18 @@ const HomeScreen: React.FC = () => {
       // If button was pressed, play associated audio - now allows multiple sounds simultaneously
       if (message.buttonPressed) {
         console.log('Button was pressed, attempting to play audio...');
-        const success = await AudioService.playAudioForDevice(message.deviceId, files);
+        // Pass buttonId for ESP32 multi-button support
+        const success = await AudioService.playAudioForDevice(
+          message.deviceId,
+          files,
+          message.buttonId
+        );
         if (!success) {
-          console.log('No audio file associated with this device.');
+          if (message.buttonId) {
+            console.log(`No audio file associated with device ${message.deviceId}, button ${message.buttonId}`);
+          } else {
+            console.log('No audio file associated with this device.');
+          }
         } else {
           console.log('Successfully played audio for device');
 

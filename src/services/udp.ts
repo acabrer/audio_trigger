@@ -8,9 +8,11 @@ import Mutex from './udpMutex';
 // Define types for ESP messages
 export interface ESPMessage {
   deviceId: string;
+  buttonId?: string; // Optional button ID for multi-button devices (ESP32)
   buttonPressed: boolean;
   timestamp: number;
   batteryLevel?: number;
+  deviceType?: 'ESP8266' | 'ESP32'; // Auto-detected based on message format
 }
 
 // Global service state to prevent UI flickering
@@ -73,20 +75,39 @@ const parseESPMessage = (message: Buffer): ESPMessage | null => {
     const messageString = message.toString('utf8');
     console.log('Received UDP message:', messageString);
 
-    // Check if the message follows the ESP8266 format: "BUTTON:ID:STATE"
+    // Check if the message follows the ESP format: "BUTTON:ID:STATE" or "BUTTON:DEVICE_BUTTON:STATE"
     if (messageString.startsWith('BUTTON:')) {
       const parts = messageString.split(':');
 
       if (parts.length >= 3) {
-        const deviceId = parts[1];
+        const idPart = parts[1];
         const buttonState = parts[2] === '1'; // 1 = pressed, 0 = released
+
+        // Check if this is a composite ID (DEVICE_BUTTON format for ESP32)
+        let deviceId: string;
+        let buttonId: string | undefined;
+        let deviceType: 'ESP8266' | 'ESP32' = 'ESP8266';
+
+        if (idPart.includes('_')) {
+          // Composite ID format (ESP32 with multiple buttons)
+          const idComponents = idPart.split('_');
+          deviceId = idComponents[0];
+          buttonId = idComponents[1];
+          deviceType = 'ESP32';
+          console.log(`Detected ESP32 device ${deviceId}, button ${buttonId}`);
+        } else {
+          // Simple ID format (ESP8266 single button)
+          deviceId = idPart;
+          console.log(`Detected ESP8266 device ${deviceId}`);
+        }
 
         return {
           deviceId,
+          buttonId,
           buttonPressed: buttonState,
           timestamp: Date.now(),
-          // We don't have battery level in this format, could be added later
           batteryLevel: 1.0, // Default to 100% for now
+          deviceType,
         };
       }
     }
