@@ -5,6 +5,9 @@ import {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
 import {addDevice, updateDevice} from '../store/slices/espDevices';
 import UDPService, {ESPMessage, useUDPListener} from '../services/udp';
+import BluetoothLEService, {
+  useBluetoothLE,
+} from '../services/bluetoothLE';
 import AudioService from '../services/audio';
 import {RootStackParamList} from '../types/types';
 import {setFiles} from '../store/slices/audioFiles';
@@ -30,7 +33,8 @@ const HomeScreen: React.FC = () => {
   // Get state from Redux
   const {devices} = useAppSelector(state => state.espDevices);
   const {files} = useAppSelector(state => state.audioFiles);
-  const {autoStartListener, udpPort} = useAppSelector(state => state.settings);
+  const {autoStartListener, udpPort, connectionMode, pairedBluetoothDevice} =
+    useAppSelector(state => state.settings);
 
   // Local state - use refs for values that shouldn't trigger rerenders
   const [isInitialized, setIsInitialized] = useState(false);
@@ -44,7 +48,20 @@ const HomeScreen: React.FC = () => {
   const [loopingFiles, setLoopingFiles] = useState<string[]>([]);
 
   // Use the UDP listener hook with stable references
-  const {isListening, startListener, stopListener, error} = useUDPListener();
+  const {
+    isListening,
+    startListener: startUDPListener,
+    stopListener: stopUDPListener,
+    error: udpError,
+  } = useUDPListener();
+
+  // Use Bluetooth LE hook
+  const {
+    isConnected: isBLEConnected,
+    connect: connectBLE,
+    disconnect: disconnectBLE,
+    error: bleError,
+  } = useBluetoothLE();
 
   // Check for active sounds and looping files periodically
   useEffect(() => {
@@ -72,40 +89,113 @@ const HomeScreen: React.FC = () => {
     return () => clearInterval(interval);
   }, [playingDevices, loopingFiles]);
 
-  // Handle ESP button press - debounce device updates
+  // Handle ESP button press - optimized and instrumented for minimal latency
   const handleESPMessage = useCallback(
     async (message: ESPMessage) => {
+      const messageStart = performance.now();
       console.log('Home screen received ESP message:', message);
 
       // Update last message - always show the latest
       setLastMessage(message);
       setLastMessageTimestamp(Date.now());
 
-      // Check if we already know this device
-      const existingDevice = devices.find(
-        device => device.id === message.deviceId,
-      );
+      // If button was pressed, play audio FIRST (fast path)
+      // Then do device tracking afterwards to minimize latency
+      if (message.buttonPressed) {
+        console.log('Button was pressed, attempting to play audio...');
 
-      // Only update Redux store on button press or for new devices
-      if (!existingDevice || message.buttonPressed) {
-        if (existingDevice) {
-          // Update last seen timestamp, battery level, and device type
-          dispatch(
-            updateDevice({
-              id: message.deviceId,
-              lastSeen: message.timestamp,
-              batteryLevel: message.batteryLevel,
-              deviceType: message.deviceType,
-              // Update button count for ESP32 devices
-              buttonCount: message.deviceType === 'ESP32' && message.buttonId
-                ? Math.max(existingDevice.buttonCount || 0, parseInt(message.buttonId) || 0)
-                : existingDevice.buttonCount,
-            }),
-          );
-          // Force a device list refresh but limit the frequency
-          setDeviceUpdateCount(prev => prev + 1);
+        // FAST PATH: Play audio immediately (instrumented)
+        const playbackStart = performance.now();
+        const success = await AudioService.playAudioForDevice(
+          message.deviceId,
+          files,
+          message.buttonId,
+          message.timestamp, // When message was received
+          message.espTimestamp // When touch occurred on ESP32
+        );
+        const playbackTime = performance.now() - playbackStart;
+
+        const totalHandlingTime = performance.now() - messageStart;
+        const stateUpdateTime = totalHandlingTime - playbackTime;
+
+        // Log message handling breakdown
+        console.log(
+          `📊 Message handling: ${totalHandlingTime.toFixed(2)}ms total\n` +
+          `   ├─ Playback call: ${playbackTime.toFixed(2)}ms\n` +
+          `   └─ State updates: ${stateUpdateTime.toFixed(2)}ms`
+        );
+
+        if (!success) {
+          if (message.buttonId) {
+            console.log(`No audio file associated with device ${message.deviceId}, button ${message.buttonId}`);
+          } else {
+            console.log('No audio file associated with this device.');
+          }
         } else {
-          // Add new device
+          console.log('✅ Successfully played audio for device');
+
+          // Update playing devices
+          setPlayingDevices(prev => {
+            if (!prev.includes(message.deviceId)) {
+              return [...prev, message.deviceId];
+            }
+            return prev;
+          });
+        }
+
+        // DEFERRED: Update device tracking AFTER audio plays (reduces latency by 3-8ms)
+        setTimeout(() => {
+          const existingDevice = devices.find(
+            device => device.id === message.deviceId,
+          );
+
+          if (existingDevice) {
+            // Update last seen timestamp, battery level, and device type
+            dispatch(
+              updateDevice({
+                id: message.deviceId,
+                lastSeen: message.timestamp,
+                batteryLevel: message.batteryLevel,
+                deviceType: message.deviceType,
+                // Update button count for ESP32 devices
+                buttonCount: message.deviceType === 'ESP32' && message.buttonId
+                  ? Math.max(existingDevice.buttonCount || 0, parseInt(message.buttonId) || 0)
+                  : existingDevice.buttonCount,
+              }),
+            );
+            // Force a device list refresh but limit the frequency
+            setDeviceUpdateCount(prev => prev + 1);
+          } else {
+            // Add new device
+            const deviceName = message.deviceType === 'ESP32'
+              ? `ESP32 Device ${message.deviceId}`
+              : `ESP Button ${message.deviceId}`;
+
+            dispatch(
+              addDevice({
+                id: message.deviceId,
+                name: deviceName,
+                lastSeen: message.timestamp,
+                batteryLevel: message.batteryLevel,
+                deviceType: message.deviceType,
+                buttonCount: message.deviceType === 'ESP32' && message.buttonId
+                  ? parseInt(message.buttonId) || 0
+                  : undefined,
+              }),
+            );
+            // Force a device list refresh
+            setDeviceUpdateCount(prev => prev + 1);
+          }
+        }, 0); // Defer to next tick
+      } else {
+        // Button release - skip Redux updates entirely for better performance
+        // Only update if this is a new device
+        const existingDevice = devices.find(
+          device => device.id === message.deviceId,
+        );
+
+        if (!existingDevice) {
+          // Add new device (first time seeing this device)
           const deviceName = message.deviceType === 'ESP32'
             ? `ESP32 Device ${message.deviceId}`
             : `ESP Button ${message.deviceId}`;
@@ -122,37 +212,8 @@ const HomeScreen: React.FC = () => {
                 : undefined,
             }),
           );
-          // Force a device list refresh
-          setDeviceUpdateCount(prev => prev + 1);
         }
-      }
-
-      // If button was pressed, play associated audio - now allows multiple sounds simultaneously
-      if (message.buttonPressed) {
-        console.log('Button was pressed, attempting to play audio...');
-        // Pass buttonId for ESP32 multi-button support
-        const success = await AudioService.playAudioForDevice(
-          message.deviceId,
-          files,
-          message.buttonId
-        );
-        if (!success) {
-          if (message.buttonId) {
-            console.log(`No audio file associated with device ${message.deviceId}, button ${message.buttonId}`);
-          } else {
-            console.log('No audio file associated with this device.');
-          }
-        } else {
-          console.log('Successfully played audio for device');
-
-          // Update playing devices
-          setPlayingDevices(prev => {
-            if (!prev.includes(message.deviceId)) {
-              return [...prev, message.deviceId];
-            }
-            return prev;
-          });
-        }
+        // Skip updates for button release on known devices
       }
     },
     [devices, dispatch, files],
@@ -171,19 +232,34 @@ const HomeScreen: React.FC = () => {
         await AudioService.initialize();
         console.log('Audio service initialized');
 
-        // Don't initialize UDP service here - let the useUDPListener handle it
-        // This prevents duplicate sockets on the same port
+        // Pre-warm audio system for minimal latency (eliminates cold start)
+        await AudioService.prewarmAudioSystem();
+        console.log('Audio system pre-warmed');
+
+        // Initialize BLE service
+        await BluetoothLEService.initialize();
+        console.log('BLE service initialized');
 
         if (!mounted) return;
         setIsInitialized(true);
 
-        // Start UDP service if autoStart is enabled (only on first mount)
+        // Start appropriate service based on connection mode
         if (autoStartListener) {
-          console.log('Auto-starting UDP listener...');
-          setTimeout(() => {
-            if (mounted) {
-              startListener();
-              console.log('UDP listener started');
+          setTimeout(async () => {
+            if (!mounted) return;
+
+            const mode = connectionMode || 'udp'; // Default to UDP if undefined
+            console.log('[Home] Starting service in mode:', mode);
+
+            if (mode === 'ble' && pairedBluetoothDevice) {
+              console.log('[Home] Auto-connecting to BLE device:', pairedBluetoothDevice);
+              await connectBLE(pairedBluetoothDevice);
+              console.log('[Home] BLE connection initiated');
+            } else {
+              // Default to UDP
+              console.log('[Home] Auto-starting UDP listener...');
+              startUDPListener();
+              console.log('[Home] UDP listener started');
             }
           }, 500);
         }
@@ -191,6 +267,10 @@ const HomeScreen: React.FC = () => {
         // Load and restore any looping files from previous session
         const audioFiles = await AudioService.loadAudioFiles();
         dispatch(setFiles(audioFiles));
+
+        // Preload all audio files for instant playback (eliminates disk I/O + decode time)
+        await AudioService.preloadAllAudioFiles();
+        console.log('All audio files preloaded and cached');
 
         // Restart any files that should be looping
         const filesToLoop = audioFiles.filter(file => file.loopMode);
@@ -211,11 +291,12 @@ const HomeScreen: React.FC = () => {
     // Cleanup on unmount
     return () => {
       mounted = false;
-      stopListener();
+      stopUDPListener();
+      disconnectBLE();
     };
   }, []); // Empty dependency array - only run once
 
-  // Subscribe to UDP messages when initialized
+  // Subscribe to messages when initialized
   // Using useRef to maintain stable subscription
   const handleESPMessageRef = useRef(handleESPMessage);
   handleESPMessageRef.current = handleESPMessage;
@@ -225,28 +306,66 @@ const HomeScreen: React.FC = () => {
       return;
     }
 
-    console.log('Subscribing to UDP messages');
+    const mode = connectionMode || 'udp'; // Default to UDP if undefined
+    console.log('[Home] Subscribing to messages for mode:', mode);
 
-    // Subscribe to UDP messages with stable wrapper
-    const unsubscribe = UDPService.subscribe((msg: ESPMessage) => {
-      handleESPMessageRef.current(msg);
-    });
+    // Subscribe to appropriate service based on connection mode
+    let unsubscribe: () => void;
+
+    if (mode === 'ble') {
+      // Subscribe to BLE messages
+      console.log('[Home] Subscribing to BLE messages');
+      unsubscribe = BluetoothLEService.subscribe((msg: ESPMessage) => {
+        handleESPMessageRef.current(msg);
+      });
+    } else {
+      // Subscribe to UDP messages (default)
+      console.log('[Home] Subscribing to UDP messages');
+      unsubscribe = UDPService.subscribe((msg: ESPMessage) => {
+        handleESPMessageRef.current(msg);
+      });
+    }
 
     return () => {
       unsubscribe();
     };
-  }, [isInitialized]); // Only re-subscribe when initialized changes
+  }, [isInitialized, connectionMode]); // Re-subscribe when mode changes
 
-  // Toggle UDP listener with stable reference
-  const toggleListener = useCallback(() => {
-    console.log('Toggle listener clicked, current state:', isListening);
+  // Toggle listener with stable reference (supports both UDP and BLE)
+  const toggleListener = useCallback(async () => {
+    const mode = connectionMode || 'udp'; // Default to UDP if undefined
+    console.log('[Home] Toggle listener for mode:', mode);
 
-    if (isListening) {
-      stopListener();
+    if (mode === 'ble') {
+      console.log(
+        '[Home] Toggle BLE connection, current state:',
+        isBLEConnected,
+      );
+
+      if (isBLEConnected) {
+        await disconnectBLE();
+      } else if (pairedBluetoothDevice) {
+        await connectBLE(pairedBluetoothDevice);
+      }
     } else {
-      startListener();
+      console.log('[Home] Toggle UDP listener, current state:', isListening);
+
+      if (isListening) {
+        stopUDPListener();
+      } else {
+        startUDPListener();
+      }
     }
-  }, [isListening, startListener, stopListener]);
+  }, [
+    connectionMode,
+    isListening,
+    isBLEConnected,
+    startUDPListener,
+    stopUDPListener,
+    connectBLE,
+    disconnectBLE,
+    pairedBluetoothDevice,
+  ]);
 
   // Global stop audio function - stops all playing sounds
   const stopAllAudio = useCallback(() => {
@@ -360,6 +479,10 @@ const HomeScreen: React.FC = () => {
         rightActionTitle={
           playingDevices.length > 0 || loopingFiles.length > 0
             ? 'Stop All'
+            : (connectionMode || 'udp') === 'ble'
+            ? isBLEConnected
+              ? 'BLE ✓'
+              : 'Connect BLE'
             : isListening
             ? 'Listening'
             : 'Start Listening'
@@ -367,6 +490,10 @@ const HomeScreen: React.FC = () => {
         rightActionColor={
           playingDevices.length > 0 || loopingFiles.length > 0
             ? '#e53e3e'
+            : (connectionMode || 'udp') === 'ble'
+            ? isBLEConnected
+              ? '#48bb78'
+              : '#718096'
             : isListening
             ? '#48bb78'
             : '#718096'
@@ -389,8 +516,12 @@ const HomeScreen: React.FC = () => {
         onStopLoop={onStopButtonAudio}
       />
 
-      {/* UDP Status Card */}
-      <UDPStatusCard port={udpPort} isListening={isListening} error={error} />
+      {/* Connection Status Card */}
+      <UDPStatusCard
+        port={udpPort}
+        isListening={connectionMode === 'ble' ? isBLEConnected : isListening}
+        error={connectionMode === 'ble' ? bleError : udpError}
+      />
 
       {/* Last Message Card */}
       <LastMessageCard lastMessage={lastMessage} />

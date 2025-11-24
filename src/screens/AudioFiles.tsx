@@ -14,6 +14,7 @@ import {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
 import {
   addFile,
+  addFiles,
   removeFile,
   setFiles,
   updateFile,
@@ -73,15 +74,16 @@ const AudioFilesScreen: React.FC = () => {
     return () => clearInterval(intervalId);
   }, [dispatch, files]);
 
-  // Pick an audio file using the document picker
+  // Pick audio file(s) using the document picker - supports multiple selection
   const pickAudioFile = async () => {
     try {
       setIsAdding(true);
       console.log('Opening document picker...');
 
-      // Use the document picker API
+      // Use the document picker API with multi-selection enabled
       const results = await pick({
         type: [types.audio],
+        allowMultiSelection: true, // Enable selecting multiple files at once
       });
 
       if (!results || results.length === 0) {
@@ -89,32 +91,103 @@ const AudioFilesScreen: React.FC = () => {
         return;
       }
 
-      const pickedFile = results[0];
-      console.log('Document picker result:', pickedFile);
+      console.log(`User selected ${results.length} file(s)`);
 
-      // Get a title for the file
-      let fileTitle =
-        pickedFile.name?.split('.').slice(0, -1).join('.') || 'Untitled Audio';
+      // Process all selected files in parallel
+      const addResults = await Promise.all(
+        results.map(async (pickedFile, index) => {
+          try {
+            console.log(`Processing file ${index + 1}/${results.length}:`, pickedFile.name);
 
-      // Make sure we have a valid URI
-      if (!pickedFile.uri) {
-        console.error('Picked file has no URI');
-        Alert.alert('Error', 'Selected file is invalid', [{text: 'OK'}]);
-        return;
-      }
+            // Get a title for the file
+            const fileTitle =
+              pickedFile.name?.split('.').slice(0, -1).join('.') || 'Untitled Audio';
 
-      // Add the file directly without keepLocalCopy since it's causing type issues
-      console.log('Adding audio file:', pickedFile.uri);
-      const newFile = await AudioService.addAudioFile(
-        pickedFile.uri,
-        fileTitle,
+            // Make sure we have a valid URI
+            if (!pickedFile.uri) {
+              console.error('Picked file has no URI:', pickedFile.name);
+              return {
+                success: false,
+                fileName: pickedFile.name || 'Unknown',
+                error: 'Invalid file URI',
+              };
+            }
+
+            // Add the file
+            console.log('Adding audio file:', pickedFile.uri);
+            const newFile = await AudioService.addAudioFile(
+              pickedFile.uri,
+              fileTitle,
+            );
+
+            if (newFile) {
+              return {
+                success: true,
+                fileName: fileTitle,
+                file: newFile,
+              };
+            } else {
+              return {
+                success: false,
+                fileName: fileTitle,
+                error: 'Failed to add file',
+              };
+            }
+          } catch (fileErr) {
+            console.error('Error processing file:', pickedFile.name, fileErr);
+            return {
+              success: false,
+              fileName: pickedFile.name || 'Unknown',
+              error: fileErr instanceof Error ? fileErr.message : 'Unknown error',
+            };
+          }
+        }),
       );
 
-      if (newFile) {
-        dispatch(addFile(newFile));
-        Alert.alert('Success', 'Audio file added successfully', [{text: 'OK'}]);
+      // Count successes and failures
+      const successCount = addResults.filter(r => r.success).length;
+      const failureCount = addResults.filter(r => !r.success).length;
+
+      // Batch dispatch all successfully added files to Redux store
+      const successfulFiles = addResults
+        .filter(r => r.success && r.file)
+        .map(r => r.file!);
+
+      if (successfulFiles.length > 0) {
+        console.log(`Dispatching ${successfulFiles.length} files to Redux store`);
+        dispatch(addFiles(successfulFiles));
+      }
+
+      // Show appropriate feedback
+      if (failureCount === 0) {
+        // All files added successfully
+        const message = results.length === 1
+          ? 'Audio file added successfully'
+          : `Successfully added ${successCount} audio file${successCount > 1 ? 's' : ''}`;
+        Alert.alert('Success', message, [{text: 'OK'}]);
+      } else if (successCount === 0) {
+        // All files failed
+        const failedFiles = addResults
+          .filter(r => !r.success)
+          .map(r => `• ${r.fileName}: ${r.error}`)
+          .join('\n');
+        Alert.alert(
+          'Error',
+          `Failed to add ${failureCount} file${failureCount > 1 ? 's' : ''}:\n\n${failedFiles}`,
+          [{text: 'OK'}],
+        );
       } else {
-        Alert.alert('Error', 'Failed to add audio file', [{text: 'OK'}]);
+        // Partial success
+        const failedFiles = addResults
+          .filter(r => !r.success)
+          .map(r => `• ${r.fileName}`)
+          .join('\n');
+        Alert.alert(
+          'Partial Success',
+          `Added ${successCount} file${successCount > 1 ? 's' : ''} successfully.\n\n` +
+          `Failed to add ${failureCount} file${failureCount > 1 ? 's' : ''}:\n${failedFiles}`,
+          [{text: 'OK'}],
+        );
       }
     } catch (err) {
       console.error('Error picking document:', err);

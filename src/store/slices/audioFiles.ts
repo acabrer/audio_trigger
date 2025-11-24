@@ -29,6 +29,9 @@ const audioFilesSlice = createSlice({
     addFile(state, action: PayloadAction<AudioFile>) {
       state.files.push(action.payload);
     },
+    addFiles(state, action: PayloadAction<AudioFile[]>) {
+      state.files.push(...action.payload);
+    },
     updateFile(
       state,
       action: PayloadAction<Partial<AudioFile> & {id: string}>,
@@ -63,6 +66,7 @@ const audioFilesSlice = createSlice({
 export const {
   setFiles,
   addFile,
+  addFiles,
   updateFile,
   removeFile,
   setCurrentFile,

@@ -8,6 +8,7 @@ import {
   ScrollView,
   SafeAreaView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import {useNavigation} from '@react-navigation/native';
@@ -21,6 +22,7 @@ import StorageService from '../services/storage';
 import {RootStackParamList} from '../types/types';
 import UDPService from '../services/udp';
 import SoundPlayer from 'react-native-sound-player'; // Changed from TrackPlayer
+import {useBluetoothLE} from '../services/bluetoothLE';
 
 type SettingsScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -34,6 +36,10 @@ const SettingsScreen: React.FC = () => {
   // Get settings from Redux state
   const settings = useAppSelector(state => state.settings);
 
+  // Bluetooth LE hook
+  const {scanDevices, connect, disconnect, isConnected, device, isScanning: bleScanning} =
+    useBluetoothLE();
+
   // Local state for input values
   const [portValue, setPortValue] = useState(settings.udpPort.toString());
   const [volumeValue, setVolumeValue] = useState(settings.maxVolume);
@@ -41,9 +47,52 @@ const SettingsScreen: React.FC = () => {
     settings.autoStartListener,
   );
   const [darkModeValue, setDarkModeValue] = useState(settings.darkMode);
+  const [connectionModeValue, setConnectionModeValue] = useState<
+    'udp' | 'ble'
+  >(settings.connectionMode || 'udp');
+
+  // Debug log to verify Bluetooth UI is loaded
+  useEffect(() => {
+    console.log('[Settings] Connection mode:', settings.connectionMode);
+    console.log('[Settings] Connection mode value:', connectionModeValue);
+  }, [settings.connectionMode, connectionModeValue]);
+
+  // BLE device scanning state
+  const [availableDevices, setAvailableDevices] = useState<any[]>([]);
 
   // Track if settings have been modified
   const [isModified, setIsModified] = useState(false);
+
+  // Scan for BLE devices
+  const handleScanDevices = async () => {
+    try {
+      const devices = await scanDevices();
+      setAvailableDevices(devices);
+      if (devices.length === 0) {
+        Alert.alert(
+          'No Devices Found',
+          'No ESP32 devices found. Make sure your ESP32 is powered on and advertising.',
+        );
+      }
+    } catch (error) {
+      Alert.alert('Scan Error', 'Failed to scan for BLE devices');
+    }
+  };
+
+  // Connect to BLE device
+  const handleConnectBLE = async (deviceId: string) => {
+    try {
+      const success = await connect(deviceId);
+      if (success) {
+        Alert.alert('Connected', 'Successfully connected to ESP32 via BLE');
+        setIsModified(true);
+      } else {
+        Alert.alert('Connection Failed', 'Could not connect to device');
+      }
+    } catch (error) {
+      Alert.alert('Connection Error', 'An error occurred while connecting');
+    }
+  };
 
   // Apply settings changes
   const applySettings = async () => {
@@ -52,6 +101,8 @@ const SettingsScreen: React.FC = () => {
       autoStartListener: autoStartValue,
       maxVolume: volumeValue,
       darkMode: darkModeValue,
+      connectionMode: connectionModeValue,
+      pairedBluetoothDevice: device?.id,
     };
 
     // Validate the port number
@@ -136,7 +187,9 @@ const SettingsScreen: React.FC = () => {
         parseInt(portValue, 10) !== settings.udpPort ||
         autoStartValue !== settings.autoStartListener ||
         volumeValue !== settings.maxVolume ||
-        darkModeValue !== settings.darkMode
+        darkModeValue !== settings.darkMode ||
+        connectionModeValue !== (settings.connectionMode || 'udp') ||
+        device?.id !== settings.pairedBluetoothDevice
       ) {
         setIsModified(true);
       } else {
@@ -145,7 +198,15 @@ const SettingsScreen: React.FC = () => {
     };
 
     checkModified();
-  }, [portValue, autoStartValue, volumeValue, darkModeValue, settings]);
+  }, [
+    portValue,
+    autoStartValue,
+    volumeValue,
+    darkModeValue,
+    connectionModeValue,
+    device,
+    settings,
+  ]);
 
   return (
     <SafeAreaView className="flex-1 bg-gray-100">
@@ -163,11 +224,107 @@ const SettingsScreen: React.FC = () => {
 
         {/* Settings Sections */}
         <View className="p-4">
-          {/* Network Settings */}
-          <View className="bg-white p-4 rounded-lg shadow-sm mb-4">
+          {/* Connection Mode */}
+          <View className="bg-blue-50 p-4 rounded-lg shadow-sm mb-4 border-2 border-blue-500">
             <Text className="text-lg font-bold mb-4 text-gray-800">
-              Network Settings
+              🔵 Connection Mode (NEW)
             </Text>
+
+            <View className="flex-row justify-between items-center mb-2">
+              <View className="flex-1">
+                <Text className="text-base text-gray-800">
+                  {connectionModeValue === 'udp' ? 'UDP Network' : 'BLE (Bluetooth Low Energy)'}
+                </Text>
+                <Text className="text-xs text-gray-400 mt-1">
+                  {connectionModeValue === 'udp'
+                    ? 'Connect via WiFi (supports multiple devices, 30-80ms latency)'
+                    : 'Direct BLE connection (single device, 15-30ms latency ⚡)'}
+                </Text>
+              </View>
+              <Switch
+                value={connectionModeValue === 'ble'}
+                onValueChange={value => {
+                  setConnectionModeValue(value ? 'ble' : 'udp');
+                }}
+                trackColor={{false: '#767577', true: '#3498db'}}
+                thumbColor={
+                  connectionModeValue === 'ble' ? '#fff' : '#f4f3f4'
+                }
+              />
+            </View>
+
+            {/* BLE Device Picker */}
+            {connectionModeValue === 'ble' && (
+              <View className="mt-4 pt-4 border-t border-gray-200">
+                <Text className="text-sm text-gray-600 mb-2">
+                  BLE Device
+                </Text>
+
+                {isConnected && device ? (
+                  <View className="bg-green-50 p-3 rounded-lg mb-2">
+                    <Text className="text-green-800 font-semibold">
+                      Connected: {device.name || 'ESP32 Touch Sensor'}
+                    </Text>
+                    <Text className="text-green-600 text-xs mt-1">
+                      ID: {device.id}
+                    </Text>
+                    <TouchableOpacity
+                      className="mt-2 bg-red-100 p-2 rounded"
+                      onPress={disconnect}>
+                      <Text className="text-red-600 text-center text-sm">
+                        Disconnect
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    className="bg-blue-100 p-3 rounded-lg mb-2"
+                    onPress={handleScanDevices}
+                    disabled={bleScanning}>
+                    {bleScanning ? (
+                      <View className="flex-row items-center justify-center">
+                        <ActivityIndicator size="small" color="#3498db" />
+                        <Text className="text-blue-600 ml-2">Scanning...</Text>
+                      </View>
+                    ) : (
+                      <Text className="text-blue-600 text-center">
+                        Scan for ESP32 BLE Devices
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                )}
+
+                {/* Available Devices List */}
+                {availableDevices.length > 0 && !isConnected && (
+                  <View className="mt-2">
+                    <Text className="text-xs text-gray-500 mb-2">
+                      Available Devices:
+                    </Text>
+                    {availableDevices.map(dev => (
+                      <TouchableOpacity
+                        key={dev.id}
+                        className="bg-gray-50 p-3 rounded-lg mb-2"
+                        onPress={() => handleConnectBLE(dev.id)}>
+                        <Text className="text-gray-800 font-medium">
+                          {dev.name || dev.localName || 'ESP32 Touch Sensor'}
+                        </Text>
+                        <Text className="text-gray-500 text-xs">
+                          ID: {dev.id}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+          </View>
+
+          {/* Network Settings (only show when UDP mode) */}
+          {connectionModeValue === 'udp' && (
+            <View className="bg-white p-4 rounded-lg shadow-sm mb-4">
+              <Text className="text-lg font-bold mb-4 text-gray-800">
+                Network Settings
+              </Text>
 
             <View className="mb-4">
               <Text className="text-sm text-gray-500 mb-1">UDP Port</Text>
@@ -198,6 +355,7 @@ const SettingsScreen: React.FC = () => {
               Automatically start listening for ESP devices when app launches
             </Text>
           </View>
+          )}
 
           {/* Audio Settings */}
           <View className="bg-white p-4 rounded-lg shadow-sm mb-4">

@@ -5,6 +5,8 @@ export interface AppSettings {
   udpPort: number;
   autoStartListener: boolean;
   bluetoothDeviceName?: string;
+  connectionMode: 'udp' | 'ble'; // Connection mode: UDP or BLE
+  pairedBluetoothDevice?: string; // BLE device ID
   maxVolume: number;
   darkMode: boolean;
   lastConnectedDevices: string[];
@@ -14,6 +16,7 @@ export interface AppSettings {
 const DEFAULT_SETTINGS: AppSettings = {
   udpPort: 8888,
   autoStartListener: true,
+  connectionMode: 'udp', // Default to UDP mode
   maxVolume: 1.0,
   darkMode: false,
   lastConnectedDevices: [],

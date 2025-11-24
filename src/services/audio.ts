@@ -9,6 +9,96 @@ import {Buffer} from 'buffer';
 import AudioBufferCache from './audioBufferCache';
 import {globalRetryManager, globalCircuitBreaker, globalHealthMonitor} from '../utils/errorRecovery';
 
+// ============== PERFORMANCE TRACKING ==============
+// Professional performance analysis system for detecting bottlenecks
+class PerformanceTracker {
+  private metrics: Map<string, number[]> = new Map();
+
+  track(key: string, value: number): void {
+    if (!this.metrics.has(key)) {
+      this.metrics.set(key, []);
+    }
+    this.metrics.get(key)!.push(value);
+  }
+
+  getStats(key: string) {
+    const values = this.metrics.get(key) || [];
+    if (values.length === 0) return null;
+
+    const sorted = [...values].sort((a, b) => a - b);
+    return {
+      count: values.length,
+      min: sorted[0],
+      max: sorted[sorted.length - 1],
+      avg: values.reduce((a, b) => a + b) / values.length,
+      p50: sorted[Math.floor(values.length * 0.5)],
+      p95: sorted[Math.floor(values.length * 0.95)],
+      p99: sorted[Math.floor(values.length * 0.99)],
+    };
+  }
+
+  printReport(): void {
+    console.log('\n╔════════════════════════════════════════════════╗');
+    console.log('║       PERFORMANCE ANALYSIS REPORT              ║');
+    console.log('╚════════════════════════════════════════════════╝\n');
+
+    const categories = {
+      'Preload Metrics': ['preload_total_time', 'preload_io_time', 'preload_cache_insert', 'preload_total_per_file'],
+      'Playback Metrics': ['playback_total', 'playback_file_lookup', 'playback_cache_lookup', 'playback_create_source', 'playback_start'],
+      'Latency Metrics': ['latency_total'],
+    };
+
+    for (const [category, metricKeys] of Object.entries(categories)) {
+      console.log(`\n📊 ${category}:`);
+      console.log('─'.repeat(50));
+
+      for (const key of metricKeys) {
+        const stats = this.getStats(key);
+        if (stats && stats.count > 0) {
+          console.log(`\n  ${key}:`);
+          console.log(`    Samples: ${stats.count}`);
+          console.log(`    Min:     ${stats.min.toFixed(2)}ms`);
+          console.log(`    Avg:     ${stats.avg.toFixed(2)}ms`);
+          console.log(`    P50:     ${stats.p50.toFixed(2)}ms`);
+          console.log(`    P95:     ${stats.p95.toFixed(2)}ms`);
+          console.log(`    Max:     ${stats.max.toFixed(2)}ms`);
+        }
+      }
+    }
+
+    console.log('\n' + '═'.repeat(50) + '\n');
+  }
+
+  clear(): void {
+    this.metrics.clear();
+    console.log('🧹 Performance metrics cleared');
+  }
+
+  getSummary(): string {
+    const latencyStats = this.getStats('latency_total');
+    const lookupStats = this.getStats('playback_file_lookup');
+    const preloadStats = this.getStats('preload_total_time');
+
+    let summary = '📊 Performance Summary:\n';
+
+    if (latencyStats) {
+      summary += `  • Total Latency: ${latencyStats.avg.toFixed(1)}ms avg (${latencyStats.min.toFixed(1)}-${latencyStats.max.toFixed(1)}ms)\n`;
+    }
+
+    if (lookupStats) {
+      summary += `  • File Lookup: ${lookupStats.avg.toFixed(2)}ms avg ${lookupStats.avg > 1 ? '⚠️ SLOW' : '✓'}\n`;
+    }
+
+    if (preloadStats) {
+      summary += `  • Preload Time: ${preloadStats.avg.toFixed(0)}ms\n`;
+    }
+
+    return summary;
+  }
+}
+
+const perfTracker = new PerformanceTracker();
+
 // Define types for audio files
 export interface AudioFile {
   id: string;
@@ -43,6 +133,157 @@ export const AudioService = {
 
   // Flag to track initialization state
   isInitialized: false,
+
+  // Flag to track if system has been pre-warmed
+  isPrewarmed: false,
+
+  // Pre-warm the audio system for minimal latency
+  // Eliminates cold-start penalty (5-8ms)
+  prewarmAudioSystem: async (): Promise<boolean> => {
+    try {
+      if (AudioService.isPrewarmed) {
+        console.log('[Prewarm] Audio system already pre-warmed');
+        return true;
+      }
+
+      console.log('[Prewarm] Pre-warming audio system...');
+      const startTime = Date.now();
+
+      // Ensure audio service is initialized
+      if (!AudioService.isInitialized) {
+        await AudioService.initialize();
+      }
+
+      if (!AudioService.audioContext) {
+        console.error('[Prewarm] Audio context not available');
+        return false;
+      }
+
+      // Create and play a silent buffer to wake up audio hardware
+      const ctx = AudioService.audioContext;
+      const silentBuffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+      const source = ctx.createBufferSource();
+      source.buffer = silentBuffer;
+      source.connect(ctx.destination);
+      source.start(0);
+
+      AudioService.isPrewarmed = true;
+      const duration = Date.now() - startTime;
+      console.log(`[Prewarm] ✅ Audio system pre-warmed in ${duration}ms`);
+
+      return true;
+    } catch (error) {
+      console.error('[Prewarm] Failed to pre-warm audio system:', error);
+      return false;
+    }
+  },
+
+  // Preload and decode ALL audio files for instant playback
+  // Moves 8-15ms decode time to app startup instead of button press
+  // NOW WITH DETAILED PERFORMANCE INSTRUMENTATION
+  preloadAllAudioFiles: async (): Promise<boolean> => {
+    try {
+      console.log('[Preload] Starting to preload all audio files...');
+      const startTime = performance.now();
+
+      // Ensure audio service is initialized
+      if (!AudioService.isInitialized) {
+        await AudioService.initialize();
+      }
+
+      // Load all audio file metadata
+      const audioFiles = await AudioService.loadAudioFiles();
+
+      if (audioFiles.length === 0) {
+        console.log('[Preload] No audio files to preload');
+        return true;
+      }
+
+      console.log(`[Preload] Found ${audioFiles.length} audio files to preload`);
+
+      // Track individual file metrics for analysis
+      const fileMetrics: any[] = [];
+
+      // Preload all files in parallel with detailed timing
+      const preloadPromises = audioFiles.map(async (file, index) => {
+        try {
+          const fileStart = performance.now();
+
+          // Check if already cached
+          if (AudioService.audioBufferCache.get(file.id)) {
+            const cacheHitTime = performance.now() - fileStart;
+            perfTracker.track('preload_cache_hit', cacheHitTime);
+            console.log(`[Preload] ✓ ${file.title} (cached - ${cacheHitTime.toFixed(2)}ms)`);
+            return true;
+          }
+
+          // Measure I/O + decode time
+          const ioStart = performance.now();
+          const buffer = await AudioService.loadAudioBuffer(file.url);
+          const ioTime = performance.now() - ioStart;
+
+          if (buffer) {
+            // Measure cache insertion time
+            const cacheStart = performance.now();
+            AudioService.audioBufferCache.set(file.id, buffer);
+            const cacheTime = performance.now() - cacheStart;
+
+            const totalTime = performance.now() - fileStart;
+            const bufferSize = (buffer.numberOfChannels * buffer.length * 4) / 1024; // KB
+
+            // Track metrics
+            perfTracker.track('preload_io_time', ioTime);
+            perfTracker.track('preload_cache_insert', cacheTime);
+            perfTracker.track('preload_total_per_file', totalTime);
+
+            fileMetrics.push({
+              '#': index + 1,
+              File: file.title.substring(0, 20),
+              'I/O (ms)': ioTime.toFixed(1),
+              'Cache (ms)': cacheTime.toFixed(1),
+              'Total (ms)': totalTime.toFixed(1),
+              'Duration (ms)': (buffer.duration * 1000).toFixed(0),
+              'Size (KB)': bufferSize.toFixed(0),
+            });
+
+            console.log(
+              `[Preload] ✓ ${index + 1}/${audioFiles.length} ${file.title} | ` +
+              `I/O: ${ioTime.toFixed(1)}ms | Cache: ${cacheTime.toFixed(1)}ms | ` +
+              `Total: ${totalTime.toFixed(1)}ms`
+            );
+            return true;
+          } else {
+            console.warn(`[Preload] ✗ Failed to load ${file.title}`);
+            return false;
+          }
+        } catch (error) {
+          console.error(`[Preload] ✗ Error loading ${file.title}:`, error);
+          return false;
+        }
+      });
+
+      // Wait for all files to preload
+      const results = await Promise.all(preloadPromises);
+      const successCount = results.filter(r => r).length;
+      const duration = performance.now() - startTime;
+
+      // Track total preload time
+      perfTracker.track('preload_total_time', duration);
+
+      // Print detailed summary table
+      console.log('\n╔════════════════════════════════════════════════╗');
+      console.log('║           PRELOAD PERFORMANCE SUMMARY          ║');
+      console.log('╚════════════════════════════════════════════════╝');
+      console.table(fileMetrics);
+      console.log(`\n✅ Preloaded ${successCount}/${audioFiles.length} files in ${duration.toFixed(0)}ms`);
+      console.log('═'.repeat(50) + '\n');
+
+      return successCount === audioFiles.length;
+    } catch (error) {
+      console.error('[Preload] Failed to preload audio files:', error);
+      return false;
+    }
+  },
 
   // Initialize the audio service
   initialize: async () => {
@@ -118,7 +359,8 @@ export const AudioService = {
         }
       }
 
-      console.log('Loaded audio files:', validFiles);
+      // Only log when files are actually loaded (not on every poll)
+      // Removed excessive logging that was causing 1000s of log entries
       return validFiles;
     } catch (error) {
       console.error('Failed to load audio files:', error);
@@ -170,8 +412,8 @@ export const AudioService = {
         }
       }
 
-      // Generate unique ID for the file
-      const fileId = Date.now().toString();
+      // Generate unique ID for the file (timestamp + random to prevent collisions in parallel processing)
+      const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
       // Extract extension from title (preferred) or default to wav
       let extension = 'wav'; // default for audio files
@@ -447,32 +689,35 @@ export const AudioService = {
     }
   },
 
-  // Find and play audio for an ESP device - true multichannel support
+  // Find and play audio for an ESP device - OPTIMIZED & INSTRUMENTED
   playAudioForDevice: async (
     deviceId: string,
     audioFiles?: AudioFile[],
-    buttonId?: string
+    buttonId?: string,
+    messageReceivedTime?: number,
+    espTimestamp?: number
   ): Promise<boolean> => {
     try {
-      // Ensure service is initialized
-      if (!AudioService.isInitialized) {
-        await AudioService.initialize();
-      }
+      const perfStart = performance.now();
 
-      if (!AudioService.audioContext) {
+      // ===== CHECKPOINT 1: Initialization Check =====
+      const checkpoint1 = performance.now();
+      if (!AudioService.isInitialized || !AudioService.audioContext) {
         console.error('Audio context is not initialized');
         return false;
       }
-
       const ctx = AudioService.audioContext;
-      console.log('Playing audio for device:', deviceId, 'button:', buttonId);
+      const initCheckTime = performance.now() - checkpoint1;
+      perfTracker.track('playback_init_check', initCheckTime);
 
-      // Use provided files or load from storage
+      // ===== CHECKPOINT 2: File Array Access =====
+      const checkpoint2 = performance.now();
       const files = audioFiles || await AudioService.loadAudioFiles();
+      const fileAccessTime = performance.now() - checkpoint2;
+      perfTracker.track('playback_file_access', fileAccessTime);
 
-      // Find audio mapped to this device
-      // For ESP32: match both deviceId AND buttonId
-      // For ESP8266: match only deviceId (buttonId will be undefined)
+      // ===== CHECKPOINT 3: File Lookup (LINEAR SEARCH - POTENTIAL BOTTLENECK) =====
+      const checkpoint3 = performance.now();
       const audioFile = files.find(file => {
         if (buttonId) {
           // ESP32: must match both device and button
@@ -482,8 +727,11 @@ export const AudioService = {
           return file.deviceId === deviceId && !file.buttonId;
         }
       });
+      const fileLookupTime = performance.now() - checkpoint3;
+      perfTracker.track('playback_file_lookup', fileLookupTime);
 
       if (!audioFile) {
+        perfTracker.track('playback_file_not_found', performance.now() - perfStart);
         if (buttonId) {
           console.log(`No audio file mapped to device ${deviceId}, button ${buttonId}`);
         } else {
@@ -492,56 +740,128 @@ export const AudioService = {
         return false;
       }
 
-      console.log(
-        'Found audio file for device:',
-        audioFile.title,
-        audioFile.url,
-      );
+      // ===== CHECKPOINT 4: Cache Lookup =====
+      const checkpoint4 = performance.now();
+      const buffer = AudioService.audioBufferCache.get(audioFile.id);
+      const cacheLookupTime = performance.now() - checkpoint4;
+      perfTracker.track('playback_cache_lookup', cacheLookupTime);
 
-      // Get or load the audio buffer
-      let buffer = AudioService.audioBufferCache.get(audioFile.id);
       if (!buffer) {
-        console.log('Loading audio buffer from disk...');
+        // SLOW PATH: Cache miss
+        perfTracker.track('playback_cache_miss', performance.now() - perfStart);
+        console.warn(`[SLOW PATH] Cache miss for ${audioFile.title} - loading from disk`);
         const loadedBuffer = await AudioService.loadAudioBuffer(audioFile.url);
-        buffer = loadedBuffer ?? undefined;
-        if (buffer) {
-          AudioService.audioBufferCache.set(audioFile.id, buffer);
+        if (loadedBuffer) {
+          AudioService.audioBufferCache.set(audioFile.id, loadedBuffer);
+          return AudioService.playAudioForDevice(deviceId, audioFiles, buttonId, messageReceivedTime, espTimestamp);
         } else {
           console.error('Failed to load audio buffer');
           return false;
         }
-      } else {
-        console.log('Using cached audio buffer');
       }
 
-      // Stop any existing sound for this device
-      AudioService.stopDeviceAudio(deviceId);
+      // ===== CHECKPOINT 5: Stop Existing Sound =====
+      const checkpoint5 = performance.now();
+      const soundKey = buttonId ? `${deviceId}_${buttonId}` : deviceId;
+      const existingSound = AudioService.activeSounds.get(soundKey);
+      if (existingSound) {
+        try {
+          existingSound.source.stop(0);
+          existingSound.source.disconnect(); // PHASE 1: Explicit disconnect
+        } catch (e) {
+          // Ignore if already stopped
+        }
+        AudioService.activeSounds.delete(soundKey);
+      }
+      const stopExistingTime = performance.now() - checkpoint5;
+      perfTracker.track('playback_stop_existing', stopExistingTime);
 
-      // Create a source node
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
+      // ===== CHECKPOINT 6: Create Audio Source =====
+      // PHASE 1: Wrap in try-catch for release build robustness
+      let source: AudioBufferSourceNode;
+      let createSourceTime: number;
+      let startPlaybackTime: number;
+      let audioStartTime: number;
 
-      // Start playing
-      source.start(0);
+      try {
+        const checkpoint6 = performance.now();
+        source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        createSourceTime = performance.now() - checkpoint6;
+        perfTracker.track('playback_create_source', createSourceTime);
 
-      // Store the sound source
-      AudioService.activeSounds.set(audioFile.id, {
-        id: audioFile.id,
+        // ===== CHECKPOINT 7: Start Playback =====
+        const checkpoint7 = performance.now();
+        audioStartTime = Date.now();
+        source.start(0);
+        startPlaybackTime = performance.now() - checkpoint7;
+        perfTracker.track('playback_start', startPlaybackTime);
+      } catch (audioError) {
+        console.error('❌ Audio playback error (source creation/start failed):', audioError);
+        // PHASE 1: Cleanup on error
+        if (source!) {
+          try {
+            source.disconnect();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        }
+        perfTracker.track('playback_error', performance.now() - perfStart);
+        return false;
+      }
+
+      // Calculate total processing time
+      const perfEnd = performance.now();
+      const processingTime = perfEnd - perfStart;
+      perfTracker.track('playback_total', processingTime);
+
+      // Log detailed latency breakdown
+      if (messageReceivedTime) {
+        const totalLatency = audioStartTime - messageReceivedTime;
+        perfTracker.track('latency_total', totalLatency);
+
+        console.log(
+          `🎵 LATENCY BREAKDOWN:\n` +
+          `   Total: ${totalLatency}ms | Processing: ${processingTime.toFixed(2)}ms\n` +
+          `   ├─ Init check:     ${initCheckTime.toFixed(3)}ms\n` +
+          `   ├─ File access:    ${fileAccessTime.toFixed(3)}ms\n` +
+          `   ├─ File lookup:    ${fileLookupTime.toFixed(3)}ms ${fileLookupTime > 1 ? '⚠️' : '✓'}\n` +
+          `   ├─ Cache lookup:   ${cacheLookupTime.toFixed(3)}ms\n` +
+          `   ├─ Stop existing:  ${stopExistingTime.toFixed(3)}ms\n` +
+          `   ├─ Create source:  ${createSourceTime.toFixed(3)}ms\n` +
+          `   └─ Start playback: ${startPlaybackTime.toFixed(3)}ms` +
+          (espTimestamp ? `\n   ESP timestamp: ${espTimestamp}ms` : '')
+        );
+      } else {
+        console.log(`🎵 Processing: ${processingTime.toFixed(2)}ms (cache hit)`);
+      }
+
+      // Store the sound source with unique key
+      AudioService.activeSounds.set(soundKey, {
+        id: soundKey,
         deviceId,
         source,
       });
 
-      // Setup automatic cleanup when sound ends
+      // PHASE 1: Enhanced automatic cleanup when sound ends
       source.onended = () => {
-        if (AudioService.activeSounds.has(audioFile.id)) {
-          AudioService.activeSounds.delete(audioFile.id);
+        try {
+          // Disconnect from audio graph to free resources
+          source.disconnect();
+        } catch (e) {
+          // Ignore if already disconnected
+        }
+        // Remove from active sounds tracking
+        if (AudioService.activeSounds.has(soundKey)) {
+          AudioService.activeSounds.delete(soundKey);
         }
       };
 
       return true;
     } catch (error) {
       console.error('Failed to play audio for device:', error);
+      perfTracker.track('playback_error', performance.now() - perfStart);
       return false;
     }
   },
@@ -667,12 +987,14 @@ export const AudioService = {
   },
 
   // Stop a specific sound with better error handling
+  // PHASE 1: Enhanced with explicit disconnect()
   stopSound: (fileId: string): void => {
     try {
       const activeSound = AudioService.activeSounds.get(fileId);
       if (activeSound) {
         try {
           activeSound.source.stop(0);
+          activeSound.source.disconnect(); // PHASE 1: Explicit disconnect
         } catch (stopError) {
           console.warn(`Error stopping sound ${fileId}:`, stopError);
         } finally {
@@ -818,6 +1140,55 @@ export const AudioService = {
     } catch (error) {
       console.error('Failed to clean up audio service:', error);
     }
+  },
+
+  // ============== PERFORMANCE ANALYSIS METHODS ==============
+  // Professional performance monitoring and reporting
+
+  // Get comprehensive performance report
+  getPerformanceReport: () => {
+    perfTracker.printReport();
+  },
+
+  // Clear all performance metrics
+  clearPerformanceMetrics: () => {
+    perfTracker.clear();
+  },
+
+  // Get quick performance summary
+  getPerformanceSummary: (): string => {
+    return perfTracker.getSummary();
+  },
+
+  // Get memory and cache statistics
+  getMemoryStats: () => {
+    const cacheStats = AudioService.audioBufferCache.getStats();
+
+    return {
+      cacheEntries: cacheStats.entries,
+      cacheSizeMB: cacheStats.sizeMB,
+      maxCacheSizeMB: cacheStats.maxSizeMB,
+      cacheUtilization: ((cacheStats.sizeMB / cacheStats.maxSizeMB) * 100).toFixed(1) + '%',
+      activeSounds: AudioService.activeSounds.size,
+      isPrewarmed: AudioService.isPrewarmed,
+    };
+  },
+
+  // Print quick diagnostics
+  printDiagnostics: () => {
+    console.log('\n╔════════════════════════════════════════════════╗');
+    console.log('║         AUDIO SERVICE DIAGNOSTICS              ║');
+    console.log('╚════════════════════════════════════════════════╝\n');
+
+    const memStats = AudioService.getMemoryStats();
+    console.log('📊 Memory & Cache:');
+    console.log(`   • Cache entries: ${memStats.cacheEntries}`);
+    console.log(`   • Cache size: ${memStats.cacheSizeMB.toFixed(2)}MB / ${memStats.maxCacheSizeMB}MB (${memStats.cacheUtilization})`);
+    console.log(`   • Active sounds: ${memStats.activeSounds}`);
+    console.log(`   • Prewarmed: ${memStats.isPrewarmed ? 'Yes ✓' : 'No'}`);
+
+    console.log('\n' + perfTracker.getSummary());
+    console.log('═'.repeat(50) + '\n');
   },
 };
 

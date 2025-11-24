@@ -10,7 +10,8 @@ export interface ESPMessage {
   deviceId: string;
   buttonId?: string; // Optional button ID for multi-button devices (ESP32)
   buttonPressed: boolean;
-  timestamp: number;
+  timestamp: number; // When message was received by app
+  espTimestamp?: number; // When touch occurred on ESP32 (milliseconds since boot)
   batteryLevel?: number;
   deviceType?: 'ESP8266' | 'ESP32'; // Auto-detected based on message format
 }

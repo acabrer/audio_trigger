@@ -7,6 +7,7 @@ import {AppSettings} from '../../services/storage';
 const initialState: AppSettings = {
   udpPort: 4210, // Updated to match ESP8266 port
   autoStartListener: true,
+  connectionMode: 'udp', // Default to UDP mode
   maxVolume: 1.0,
   darkMode: false,
   lastConnectedDevices: [],
@@ -30,6 +31,15 @@ const settingsSlice = createSlice({
     },
     setBluetoothDeviceName(state, action: PayloadAction<string | undefined>) {
       state.bluetoothDeviceName = action.payload;
+    },
+    setConnectionMode(state, action: PayloadAction<'udp' | 'ble'>) {
+      state.connectionMode = action.payload;
+    },
+    setPairedBluetoothDevice(
+      state,
+      action: PayloadAction<string | undefined>,
+    ) {
+      state.pairedBluetoothDevice = action.payload;
     },
     setMaxVolume(state, action: PayloadAction<number>) {
       state.maxVolume = action.payload;
@@ -59,6 +69,8 @@ export const {
   setUDPPort,
   setAutoStartListener,
   setBluetoothDeviceName,
+  setConnectionMode,
+  setPairedBluetoothDevice,
   setMaxVolume,
   setDarkMode,
   addLastConnectedDevice,
