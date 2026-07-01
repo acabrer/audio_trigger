@@ -21,7 +21,8 @@ import {
 import StorageService from '../services/storage';
 import {RootStackParamList} from '../types/types';
 import UDPService from '../services/udp';
-import SoundPlayer from 'react-native-sound-player'; // Changed from TrackPlayer
+import LoopAudioService from '../services/loopAudio';
+import StreamingLoopService from '../services/streamingLoop';
 import {useBluetoothLE} from '../services/bluetoothLE';
 
 type SettingsScreenNavigationProp = NativeStackNavigationProp<
@@ -125,9 +126,10 @@ const SettingsScreen: React.FC = () => {
       // Update Redux state
       dispatch(updateSettings(updatedSettings));
 
-      // Apply volume setting to the audio player
+      // Apply volume setting to both loop audio services (only active one will apply)
       try {
-        SoundPlayer.setVolume(volumeValue); // Changed from TrackPlayer
+        LoopAudioService.setVolume(volumeValue);
+        StreamingLoopService.setVolume(volumeValue);
       } catch (error) {
         console.error('Error setting volume:', error);
       }

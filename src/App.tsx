@@ -11,6 +11,7 @@ import {setDevices} from './store/slices/espDevices';
 import {setSettings} from './store/slices/settings';
 import StorageService from './services/storage';
 import ErrorBoundary from './components/ErrorBoundary';
+import StreamingLoopPlayer from './components/StreamingLoopPlayer';
 import '../global.css';
 
 function App(): React.JSX.Element {
@@ -62,6 +63,7 @@ function App(): React.JSX.Element {
       <Provider store={store}>
         <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
         <AppNavigator />
+        <StreamingLoopPlayer />
       </Provider>
     </ErrorBoundary>
   );

@@ -13,13 +13,14 @@ import {useNavigation} from '@react-navigation/native';
 import {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useAppDispatch, useAppSelector} from '../store/hooks';
 import {
-  addFile,
   addFiles,
   removeFile,
   setFiles,
   updateFile,
 } from '../store/slices/audioFiles';
 import AudioService, {AudioFile} from '../services/audio';
+import LoopAudioService from '../services/loopAudio';
+import StreamingLoopService from '../services/streamingLoop';
 import {RootStackParamList} from '../types/types';
 // Simplified import with no unused types
 import {pick, types} from '@react-native-documents/picker';
@@ -47,24 +48,46 @@ const AudioFilesScreen: React.FC = () => {
       const audioFiles = await AudioService.loadAudioFiles();
       dispatch(setFiles(audioFiles));
 
-      // Check which files are currently playing in loop
+      // Check which files are currently playing in loop (check both services)
       const loopStatus: Record<string, boolean> = {};
+
+      // Check in-memory loop service
+      const isInMemoryPlaying = await LoopAudioService.isPlaying();
+      const inMemoryTrackId = LoopAudioService.getCurrentTrackId();
+
+      // Check streaming loop service
+      const isStreamingPlaying = await StreamingLoopService.isPlaying();
+      const streamingTrackId = StreamingLoopService.getCurrentTrackId();
+
       audioFiles.forEach(file => {
+        // File is looping if it's active in either service
         loopStatus[file.id] =
-          AudioService.isDevicePlaying(file.id) && !!file.loopMode;
+          (isInMemoryPlaying && inMemoryTrackId === file.id) ||
+          (isStreamingPlaying && streamingTrackId === file.id);
       });
       setPlayingLoops(loopStatus);
     };
 
     loadFiles();
 
-    // Set up a timer to check loop playback status
-    const intervalId = setInterval(() => {
+    // Set up a timer to check loop playback status (both services)
+    const intervalId = setInterval(async () => {
+      // Check both in-memory and streaming services
+      const isInMemoryPlaying = await LoopAudioService.isPlaying();
+      const inMemoryTrackId = LoopAudioService.getCurrentTrackId();
+
+      const isStreamingPlaying = await StreamingLoopService.isPlaying();
+      const streamingTrackId = StreamingLoopService.getCurrentTrackId();
+
       files.forEach(file => {
-        const isPlaying = AudioService.isDevicePlaying(file.id);
+        // File is looping if active in either service
+        const isLooping =
+          (isInMemoryPlaying && inMemoryTrackId === file.id) ||
+          (isStreamingPlaying && streamingTrackId === file.id);
+
         setPlayingLoops(prev => {
-          if (prev[file.id] !== isPlaying && file.loopMode) {
-            return {...prev, [file.id]: isPlaying};
+          if (prev[file.id] !== isLooping) {
+            return {...prev, [file.id]: isLooping};
           }
           return prev;
         });
@@ -242,33 +265,44 @@ const AudioFilesScreen: React.FC = () => {
     const fileId = file.id;
     const isCurrentlyPlaying = playingLoops[fileId] || false;
 
+    console.log(`\n[UI] ========== TOGGLE LOOP BUTTON PRESSED ==========`);
+    console.log(`[UI] File: "${file.title}"`);
+    console.log(`[UI] File ID: ${fileId}`);
+    console.log(`[UI] Current state: ${isCurrentlyPlaying ? 'PLAYING' : 'STOPPED'}`);
+    console.log(`[UI] Action: ${isCurrentlyPlaying ? 'STOP' : 'START'}`);
+
     if (isCurrentlyPlaying) {
       // Stop the loop
+      console.log(`[UI] Calling AudioService.stopLoopPlayback...`);
       const success = await AudioService.stopLoopPlayback(fileId);
+      console.log(`[UI] stopLoopPlayback returned: ${success}`);
+
       if (success) {
         setPlayingLoops(prev => ({...prev, [fileId]: false}));
-        // Update Redux store
-        dispatch(
-          updateFile({
-            id: fileId,
-            loopMode: false,
-          }),
-        );
+        dispatch(updateFile({id: fileId, loopMode: false}));
+        console.log(`[UI] ✓ UI state updated to STOPPED`);
+      } else {
+        console.error(`[UI] ❌ Failed to stop loop`);
       }
     } else {
       // Start the loop
+      console.log(`[UI] Calling AudioService.startLoopPlayback...`);
       const success = await AudioService.startLoopPlayback(fileId);
+      console.log(`[UI] startLoopPlayback returned: ${success}`);
+
       if (success) {
+        // startLoopPlayback sets activeSounds synchronously before returning
+        // Trust the service layer - it will be picked up by the polling interval
         setPlayingLoops(prev => ({...prev, [fileId]: true}));
-        // Update Redux store
-        dispatch(
-          updateFile({
-            id: fileId,
-            loopMode: true,
-          }),
-        );
+        dispatch(updateFile({id: fileId, loopMode: true}));
+        console.log(`[UI] ✓ UI state updated to PLAYING`);
+      } else {
+        console.error(`[UI] ❌ startLoopPlayback FAILED - keeping UI state as STOPPED`);
+        setPlayingLoops(prev => ({...prev, [fileId]: false}));
+        dispatch(updateFile({id: fileId, loopMode: false}));
       }
     }
+    console.log(`[UI] ========== TOGGLE COMPLETE ==========\n`);
   };
 
   // Play an audio file to preview it (non-looping)
@@ -278,8 +312,15 @@ const AudioFilesScreen: React.FC = () => {
       return;
     }
 
+    // Stop any currently playing audio
     await AudioService.stopPlayback();
-    await AudioService.playAudioForDevice(file.deviceId || '');
+
+    // Play this specific file as preview (not looping)
+    const success = await AudioService.playAudioFile(file.id);
+
+    if (!success) {
+      console.error('Failed to play audio file:', file.title);
+    }
   };
 
   // Get device name for a file
@@ -291,7 +332,12 @@ const AudioFilesScreen: React.FC = () => {
 
   // Render each audio file item
   const renderFileItem = ({item}: {item: AudioFile}) => (
-    <View className="bg-white mb-3 p-4 rounded-lg shadow">
+    <View
+      className={`mb-3 p-4 rounded-lg shadow ${
+        playingLoops[item.id]
+          ? 'bg-green-50 border-2 border-green-500'
+          : 'bg-white'
+      }`}>
       <View className="flex-row justify-between items-center mb-2">
         <Text className="text-base font-bold flex-1 text-gray-800">
           {item.title}
@@ -332,9 +378,14 @@ const AudioFilesScreen: React.FC = () => {
 
       {/* Loop status indicator */}
       {playingLoops[item.id] && (
-        <Text className="text-sm text-green-600 font-bold mt-1">
-          ♫ Playing in loop mode ♫
-        </Text>
+        <View className="bg-green-100 p-2 mt-2 rounded border border-green-400">
+          <Text className="text-sm text-green-700 font-bold text-center">
+            ♫ PLAYING AS BACKGROUND LOOP ♫
+          </Text>
+          <Text className="text-xs text-green-600 text-center mt-1">
+            Will continue until manually stopped
+          </Text>
+        </View>
       )}
     </View>
   );

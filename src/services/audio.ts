@@ -5,9 +5,13 @@ import {
   AudioBuffer,
 } from 'react-native-audio-api';
 import RNFS from 'react-native-fs';
-import {Buffer} from 'buffer';
 import AudioBufferCache from './audioBufferCache';
-import {globalRetryManager, globalCircuitBreaker, globalHealthMonitor} from '../utils/errorRecovery';
+import LoopAudioService from './loopAudio';
+import StreamingLoopService from './streamingLoop';
+import {globalCircuitBreaker, globalHealthMonitor} from '../utils/errorRecovery';
+
+// Memory threshold for routing decision (50MB decoded = ~12.5MB compressed MP3)
+const MEMORY_THRESHOLD_MB = 50;
 
 // ============== PERFORMANCE TRACKING ==============
 // Professional performance analysis system for detecting bottlenecks
@@ -126,7 +130,7 @@ export const AudioService = {
   audioContext: null as AudioContext | null,
 
   // Audio buffer cache with LRU eviction and memory management
-  audioBufferCache: new AudioBufferCache(50), // 50MB cache
+  audioBufferCache: new AudioBufferCache(200), // 200MB cache for trigger sounds
 
   // Store for active sounds - allows multiple sounds to play simultaneously
   activeSounds: new Map<string, ActiveSound>(),
@@ -645,16 +649,21 @@ export const AudioService = {
   },
 
   // Load and decode an audio file with better error handling
+  // Uses native decodeAudioDataSource for optimal performance on both small and large files
   loadAudioBuffer: async (fileUrl: string): Promise<AudioBuffer | null> => {
+    const startTime = performance.now();
+    console.log(`[LOAD] Starting audio load for: ${fileUrl}`);
+
     try {
       return await globalCircuitBreaker.execute(async () => {
         // Ensure service is initialized
         if (!AudioService.isInitialized) {
+          console.log('[LOAD] Audio service not initialized, initializing...');
           await AudioService.initialize();
         }
 
         if (!AudioService.audioContext) {
-          console.error('Audio context is not initialized');
+          console.error('[LOAD] ❌ Audio context is not initialized');
           return null;
         }
 
@@ -662,29 +671,48 @@ export const AudioService = {
 
         // Convert file:// URL to a usable format
         const filePath = fileUrl.replace('file://', '');
+        console.log(`[LOAD] File path: ${filePath}`);
 
-        // Read the file as binary data
-        const fileData = await RNFS.readFile(filePath, 'base64');
+        // Check if file exists
+        const fileExists = await RNFS.exists(filePath);
+        if (!fileExists) {
+          console.error(`[LOAD] ❌ File does not exist: ${filePath}`);
+          return null;
+        }
 
-        // Convert base64 to ArrayBuffer
-        // React Native doesn't have atob, use Buffer from imports
-        const buffer = Buffer.from(fileData, 'base64');
-        const arrayBuffer = buffer.buffer.slice(
-          buffer.byteOffset,
-          buffer.byteOffset + buffer.byteLength,
-        );
+        // Get file stats
+        const fileStats = await RNFS.stat(filePath);
+        const fileSizeMB = (fileStats.size / (1024 * 1024)).toFixed(2);
+        console.log(`[LOAD] File size: ${fileSizeMB}MB`);
 
-        // Decode the audio data
+        // Use decodeAudioDataSource for efficient native decoding
         try {
-          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+          console.log(`[LOAD] Calling decodeAudioDataSource for ${fileSizeMB}MB file...`);
+          const decodeStart = performance.now();
+          const audioBuffer = await ctx.decodeAudioDataSource(filePath);
+          const decodeTime = performance.now() - decodeStart;
+
+          const durationMin = (audioBuffer.duration / 60).toFixed(1);
+          const channels = audioBuffer.numberOfChannels;
+          const sampleRate = audioBuffer.sampleRate;
+          const decodedSizeMB = ((channels * audioBuffer.length * 4) / (1024 * 1024)).toFixed(1);
+
+          console.log(`[LOAD] ✅ Decode SUCCESS in ${decodeTime.toFixed(0)}ms`);
+          console.log(`[LOAD]    Duration: ${durationMin} min, Channels: ${channels}, Rate: ${sampleRate}Hz`);
+          console.log(`[LOAD]    Decoded buffer size: ${decodedSizeMB}MB`);
+
           return audioBuffer;
         } catch (decodeError) {
-          console.error('Failed to decode audio data:', decodeError);
+          const totalTime = performance.now() - startTime;
+          console.error(`[LOAD] ❌ DECODE FAILED after ${totalTime.toFixed(0)}ms:`, decodeError);
+          console.error(`[LOAD] Error details:`, JSON.stringify(decodeError, null, 2));
           return null;
         }
       });
     } catch (error) {
-      console.error('Failed to load audio buffer:', error);
+      const totalTime = performance.now() - startTime;
+      console.error(`[LOAD] ❌ LOAD FAILED after ${totalTime.toFixed(0)}ms:`, error);
+      console.error(`[LOAD] Error details:`, JSON.stringify(error, null, 2));
       return null;
     }
   },
@@ -697,13 +725,13 @@ export const AudioService = {
     messageReceivedTime?: number,
     espTimestamp?: number
   ): Promise<boolean> => {
+    const perfStart = performance.now();
     try {
-      const perfStart = performance.now();
-
       // ===== CHECKPOINT 1: Initialization Check =====
       const checkpoint1 = performance.now();
       if (!AudioService.isInitialized || !AudioService.audioContext) {
         console.error('Audio context is not initialized');
+        perfTracker.track('playback_error', performance.now() - perfStart);
         return false;
       }
       const ctx = AudioService.audioContext;
@@ -738,6 +766,13 @@ export const AudioService = {
           console.log(`No audio file mapped to device ${deviceId}`);
         }
         return false;
+      }
+
+      // Check if this file is currently looping - don't interrupt it!
+      const activeSound = AudioService.activeSounds.get(audioFile.id);
+      if (activeSound?.isLooping) {
+        console.log(`⚠️ Skipping device trigger for ${audioFile.title} - currently looping as background track`);
+        return false;  // Don't interrupt the loop
       }
 
       // ===== CHECKPOINT 4: Cache Lookup =====
@@ -866,15 +901,10 @@ export const AudioService = {
     }
   },
 
-  // Start loop playback for a specific file
-  startLoopPlayback: async (fileId: string): Promise<boolean> => {
+  // Play a specific audio file by ID (for preview/testing)
+  playAudioFile: async (fileId: string): Promise<boolean> => {
     try {
-      // Ensure service is initialized
-      if (!AudioService.isInitialized) {
-        await AudioService.initialize();
-      }
-
-      if (!AudioService.audioContext) {
+      if (!AudioService.isInitialized || !AudioService.audioContext) {
         console.error('Audio context is not initialized');
         return false;
       }
@@ -886,64 +916,157 @@ export const AudioService = {
       const file = audioFiles.find(f => f.id === fileId);
 
       if (!file) {
-        console.error('Audio file not found for loop playback:', fileId);
+        console.error('Audio file not found:', fileId);
         return false;
       }
 
-      console.log('Starting loop playback for:', file.title);
+      console.log(`Playing preview of: ${file.title}`);
+
+      // Get or load buffer
+      let buffer = AudioService.audioBufferCache.get(fileId);
+      if (!buffer) {
+        console.log(`Loading buffer for ${file.title} (large files may take time)...`);
+        const loadStart = performance.now();
+        const loadedBuffer = await AudioService.loadAudioBuffer(file.url);
+        const loadTime = performance.now() - loadStart;
+        console.log(`Buffer loaded in ${loadTime.toFixed(0)}ms`);
+
+        buffer = loadedBuffer ?? undefined;
+        if (buffer) {
+          const durationMinutes = (buffer.duration / 60).toFixed(1);
+          console.log(`Duration: ${durationMinutes} minutes`);
+          AudioService.audioBufferCache.set(fileId, buffer);
+        } else {
+          console.error('Failed to load audio buffer');
+          return false;
+        }
+      } else {
+        console.log(`Using cached buffer for ${file.title}`);
+      }
 
       // Stop any existing playback of this file
       AudioService.stopSound(fileId);
 
-      // Get or load the audio buffer
-      let buffer = AudioService.audioBufferCache.get(fileId);
-      if (!buffer) {
-        const loadedBuffer = await AudioService.loadAudioBuffer(file.url);
-        buffer = loadedBuffer ?? undefined;
-        if (buffer) {
-          AudioService.audioBufferCache.set(fileId, buffer);
-        } else {
-          console.error('Failed to load audio buffer for loop playback');
-          return false;
-        }
-      }
-
-      // Create a source node
+      // Create source node for ONE-TIME playback (no loop)
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(ctx.destination);
-      source.loop = true; // Enable looping
+      source.loop = false;  // Explicitly no looping
       source.start(0);
 
-      // Store the sound source with loop flag
+      // Store the sound source
       AudioService.activeSounds.set(fileId, {
         id: fileId,
-        deviceId: file.deviceId || 'loop', // Use 'loop' as a special deviceId
+        deviceId: 'preview',  // Special marker for preview playback
         source,
-        isLooping: true,
+        isLooping: false,
       });
 
-      // Update the file's loop mode status
-      const updatedFiles = audioFiles.map(f =>
-        f.id === fileId ? {...f, loopMode: true} : f,
-      );
+      // Auto-cleanup when done
+      source.onended = () => {
+        try {
+          source.disconnect();
+        } catch (e) {
+          // Ignore
+        }
+        AudioService.activeSounds.delete(fileId);
+      };
 
-      // Save updated metadata
-      const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
-      await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
-
+      console.log(`✓ Preview playback started for: ${file.title}`);
       return true;
     } catch (error) {
-      console.error('Failed to start loop playback:', error);
+      console.error('Failed to play audio file:', error);
       return false;
     }
   },
 
-  // Stop loop playback for a specific file
+  // Start loop playback with intelligent routing based on file size
+  startLoopPlayback: async (fileId: string): Promise<boolean> => {
+    try {
+      console.log(`\n[AudioService] ========== START LOOP PLAYBACK ==========`);
+      console.log(`[AudioService] File ID: ${fileId}`);
+
+      // Load audio files metadata
+      const audioFiles = await AudioService.loadAudioFiles();
+      const file = audioFiles.find(f => f.id === fileId);
+
+      if (!file) {
+        console.error(`[AudioService] Audio file not found: ${fileId}`);
+        return false;
+      }
+
+      // Get file size to determine routing
+      const filePath = file.url.replace('file://', '');
+      const fileStats = await RNFS.stat(filePath);
+      const fileSizeMB = fileStats.size / (1024 * 1024);
+
+      // Estimate decoded size (PCM is ~10x compressed MP3/WAV size)
+      const estimatedDecodedMB = fileSizeMB * 10;
+
+      console.log(`[AudioService] File size: ${fileSizeMB.toFixed(2)}MB`);
+      console.log(`[AudioService] Estimated decoded: ${estimatedDecodedMB.toFixed(1)}MB`);
+
+      let success = false;
+
+      // Route to appropriate playback engine
+      if (estimatedDecodedMB > MEMORY_THRESHOLD_MB) {
+        // LARGE FILE: Use streaming (react-native-video)
+        console.log(`[AudioService] 📡 Routing to STREAMING (file exceeds ${MEMORY_THRESHOLD_MB}MB threshold)`);
+
+        success = await StreamingLoopService.startLoopPlayback({
+          id: file.id,
+          url: file.url,
+          title: file.title,
+        });
+
+      } else {
+        // SMALL FILE: Use in-memory buffering (react-native-audio-api)
+        console.log(`[AudioService] 🎵 Routing to IN-MEMORY (file under ${MEMORY_THRESHOLD_MB}MB threshold)`);
+
+        success = await LoopAudioService.startLoopPlayback(
+          {
+            id: file.id,
+            url: file.url,
+            title: file.title,
+          },
+          AudioService.audioContext || undefined
+        );
+      }
+
+      if (success) {
+        // Update the file's loop mode status in metadata
+        const updatedFiles = audioFiles.map(f =>
+          f.id === fileId ? {...f, loopMode: true} : f,
+        );
+
+        const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
+        await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
+
+        console.log(`[AudioService] ✅ Loop playback started successfully`);
+      } else {
+        console.error(`[AudioService] ❌ Loop playback failed to start`);
+      }
+
+      console.log(`[AudioService] ========== LOOP PLAYBACK COMPLETE ==========\n`);
+      return success;
+
+    } catch (error) {
+      console.error('[AudioService] Failed to start loop playback:', error);
+      return false;
+    }
+  },
+
+  // Stop loop playback (stops both streaming and in-memory)
   stopLoopPlayback: async (fileId: string): Promise<boolean> => {
     try {
-      // Stop the sound
-      AudioService.stopSound(fileId);
+      console.log(`\n[AudioService] ========== STOP LOOP PLAYBACK ==========`);
+      console.log(`[AudioService] File ID: ${fileId}`);
+
+      // Stop both services (only active one will actually stop)
+      await Promise.all([
+        LoopAudioService.stopLoopPlayback(),
+        StreamingLoopService.stopLoopPlayback(),
+      ]);
 
       // Load audio files
       const audioFiles = await AudioService.loadAudioFiles();
@@ -957,9 +1080,12 @@ export const AudioService = {
       const metadataPath = `${AUDIO_DIRECTORY}/metadata.json`;
       await RNFS.writeFile(metadataPath, JSON.stringify(updatedFiles), 'utf8');
 
+      console.log(`[AudioService] ✅ Loop playback stopped`);
+      console.log(`[AudioService] ========== STOP COMPLETE ==========\n`);
+
       return true;
     } catch (error) {
-      console.error('Failed to stop loop playback:', error);
+      console.error('[AudioService] Failed to stop loop playback:', error);
       return false;
     }
   },
@@ -1122,10 +1248,13 @@ export const AudioService = {
   },
 
   // Cleanup resources
-  cleanup: () => {
+  cleanup: async () => {
     try {
       // Stop all sounds
       AudioService.stopPlayback();
+
+      // Cleanup loop audio service
+      await LoopAudioService.cleanup();
 
       // Destroy buffer cache (clears timers)
       AudioService.audioBufferCache.destroy();

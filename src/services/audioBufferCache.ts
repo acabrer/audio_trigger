@@ -47,6 +47,13 @@ export class AudioBufferCache {
     const sampleSize = 4; // 32-bit float per sample
     const bufferSize = channels * length * sampleSize;
 
+    // If buffer is larger than max cache size, skip caching
+    // (these should be handled by dedicated storage like loopBuffers)
+    if (bufferSize > this.maxSize) {
+      console.warn(`Buffer ${key} (${(bufferSize / (1024 * 1024)).toFixed(1)}MB) exceeds cache size - skipping cache`);
+      return;
+    }
+
     // Remove existing entry if present
     if (this.cache.has(key)) {
       const existing = this.cache.get(key);
