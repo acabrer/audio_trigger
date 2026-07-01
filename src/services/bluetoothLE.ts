@@ -1,8 +1,12 @@
 import {useState, useEffect, useRef} from 'react';
 import {BleManager, Device, Subscription, State} from 'react-native-ble-plx';
-import {PermissionsAndroid, Platform} from 'react-native';
+import {AppState, PermissionsAndroid, Platform} from 'react-native';
 import {Buffer} from 'buffer';
 import StorageService from './storage';
+import {
+  startBleForegroundService,
+  stopBleForegroundService,
+} from './foregroundService';
 
 // BLE Service and Characteristic UUIDs (must match ESP32 firmware)
 const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
@@ -138,6 +142,207 @@ const processCharacteristicValue = (value: string) => {
   }
 };
 
+// ============== AUTO-RECONNECT STATE ==============
+// Intent flag: true only while we WANT to be connected. Gates every reconnect
+// path so we never fight a deliberate disconnect (Settings button / unmount).
+let shouldStayConnected = false;
+// The device we should (re)connect to. Kept across drops so reconnect works
+// even if the original caller (screen) is gone.
+let currentDeviceId: string | null = null;
+// onDisconnected subscription — removed before every teardown so a late
+// callback from a dying connection can't re-enter our handlers.
+let disconnectSubscription: Subscription | null = null;
+// Re-entrancy guard: at most one reconnect loop runs at a time.
+let isReconnecting = false;
+// Pending backoff timer + attempt counter.
+let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
+// AppState listener is a process-lifetime singleton (added once).
+let appStateListenerAdded = false;
+
+// Exponential backoff (mirrors udp.ts): 1s, 2s, 4s ... capped at 30s.
+const MAX_RECONNECT_ATTEMPTS = 10;
+const BASE_RECONNECT_DELAY = 1000;
+const calculateBackoffDelay = (attempt: number): number =>
+  Math.min(BASE_RECONNECT_DELAY * Math.pow(2, attempt), 30000);
+
+// Tear down the current connection WITHOUT changing intent. Shared by the
+// public disconnect() and the reconnect routine. Removes listeners first so a
+// late callback from the dying connection can't re-enter our handlers.
+const teardownConnection = async (): Promise<void> => {
+  if (characteristicSubscription) {
+    characteristicSubscription.remove();
+    characteristicSubscription = null;
+  }
+  if (disconnectSubscription) {
+    disconnectSubscription.remove();
+    disconnectSubscription = null;
+  }
+  if (globalDevice) {
+    try {
+      await globalDevice.cancelConnection();
+    } catch (e) {
+      // Device may already be gone — ignore.
+    }
+  }
+  globalDevice = null;
+  globalIsConnected = false;
+};
+
+// Low-level connect shared by connect() and attemptReconnect(): open the link,
+// (re)discover, (re)subscribe to notifications, and register the disconnect
+// handler. Throws on failure. Does NOT touch intent or currentDeviceId.
+const establishConnection = async (deviceId: string): Promise<void> => {
+  if (!bleManager) {
+    throw new Error('BLE Manager not initialized');
+  }
+
+  const device = await bleManager.connectToDevice(deviceId, {timeout: 10000});
+  console.log('[BLE] Connected to:', device.name);
+
+  await device.discoverAllServicesAndCharacteristics();
+
+  // Re-establish the notification subscription (it dies with the old link).
+  characteristicSubscription = device.monitorCharacteristicForService(
+    SERVICE_UUID,
+    CHARACTERISTIC_UUID,
+    (error, characteristic) => {
+      if (error) {
+        // Log only. Reconnect is driven exclusively by onDisconnected below,
+        // so recovery is never double-triggered from here.
+        console.error('[BLE] Characteristic monitoring error:', error);
+        return;
+      }
+      if (characteristic?.value) {
+        const decodedValue = Buffer.from(
+          characteristic.value,
+          'base64',
+        ).toString('utf-8');
+        processCharacteristicValue(decodedValue);
+      }
+    },
+  );
+
+  // Single source of reconnect triggers.
+  disconnectSubscription = device.onDisconnected(() => {
+    handleUnexpectedDisconnect();
+  });
+
+  globalDevice = device;
+  globalIsConnected = true;
+};
+
+// Fired by ble-plx when the link drops. Because intent is set to false before
+// any *deliberate* teardown, this only starts recovery for real drops.
+const handleUnexpectedDisconnect = (): void => {
+  console.log('[BLE] Device disconnected');
+  globalIsConnected = false;
+  if (characteristicSubscription) {
+    characteristicSubscription.remove();
+    characteristicSubscription = null;
+  }
+  if (disconnectSubscription) {
+    disconnectSubscription.remove();
+    disconnectSubscription = null;
+  }
+  globalDevice = null;
+
+  if (shouldStayConnected && currentDeviceId && !isReconnecting) {
+    scheduleReconnect();
+  }
+};
+
+// Cancel any in-flight reconnect loop / pending timer and reset the counter.
+const cancelReconnect = (): void => {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  isReconnecting = false;
+  reconnectAttempts = 0;
+};
+
+// One reconnect attempt; on failure it schedules the next with backoff.
+const attemptReconnect = async (): Promise<void> => {
+  if (!shouldStayConnected || !currentDeviceId || globalIsConnected) {
+    isReconnecting = false;
+    reconnectAttempts = 0;
+    return;
+  }
+
+  try {
+    console.log(
+      `[BLE] Reconnect attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS}...`,
+    );
+    await teardownConnection(); // normalize state before a fresh connect
+    await establishConnection(currentDeviceId);
+    console.log('[BLE] Reconnected successfully');
+    reconnectAttempts = 0;
+    isReconnecting = false;
+    return;
+  } catch (e) {
+    console.warn('[BLE] Reconnect attempt failed:', e);
+  }
+
+  if (!shouldStayConnected) {
+    isReconnecting = false;
+    return;
+  }
+
+  reconnectAttempts++;
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.warn(
+      '[BLE] Max reconnect attempts reached; will retry when app returns to foreground',
+    );
+    isReconnecting = false;
+    return;
+  }
+
+  const delay = calculateBackoffDelay(reconnectAttempts);
+  console.log(`[BLE] Next reconnect in ${delay}ms`);
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+  }
+  reconnectTimeout = setTimeout(() => {
+    reconnectTimeout = null;
+    attemptReconnect();
+  }, delay);
+};
+
+// Start a reconnect loop if one isn't already running.
+const scheduleReconnect = (): void => {
+  if (isReconnecting) {
+    return;
+  }
+  if (!shouldStayConnected || !currentDeviceId) {
+    return;
+  }
+  isReconnecting = true;
+  reconnectAttempts = 0;
+  attemptReconnect();
+};
+
+// Reconnect immediately when the app returns to the foreground (collapses the
+// "wake phone -> wait" gap). Registered once for the app's lifetime.
+const setupAppStateListener = (): void => {
+  if (appStateListenerAdded) {
+    return;
+  }
+  appStateListenerAdded = true;
+  AppState.addEventListener('change', nextState => {
+    if (
+      nextState === 'active' &&
+      shouldStayConnected &&
+      !globalIsConnected &&
+      currentDeviceId
+    ) {
+      console.log('[BLE] App foregrounded while disconnected — reconnecting');
+      cancelReconnect(); // reset backoff so we retry promptly
+      scheduleReconnect();
+    }
+  });
+};
+
 // Bluetooth LE Service
 const BluetoothLEService = {
   // Request Bluetooth permissions
@@ -182,6 +387,9 @@ const BluetoothLEService = {
     if (!bleManager) {
       bleManager = new BleManager();
     }
+
+    // Register the foreground-reconnect listener once (process-lifetime).
+    setupAppStateListener();
 
     // Request permissions
     const hasPermissions = await BluetoothLEService.requestPermissions();
@@ -259,42 +467,21 @@ const BluetoothLEService = {
     try {
       console.log('[BLE] Connecting to device:', deviceId);
 
-      // Disconnect from any existing device
-      await BluetoothLEService.disconnect();
+      // Stop any reconnect loop and tear down an existing link (intentional).
+      cancelReconnect();
+      await teardownConnection();
 
-      // Connect to device with timeout
-      const device = await bleManager.connectToDevice(deviceId, {
-        timeout: 10000,
-      });
+      currentDeviceId = deviceId;
+      await establishConnection(deviceId);
 
-      console.log('[BLE] Connected to:', device.name);
+      // Arm auto-reconnect ONLY after a successful connect, so a failed first
+      // connect doesn't keep retrying a device that never worked.
+      shouldStayConnected = true;
 
-      // Discover services and characteristics
-      await device.discoverAllServicesAndCharacteristics();
-
-      // Subscribe to characteristic notifications
-      characteristicSubscription = device.monitorCharacteristicForService(
-        SERVICE_UUID,
-        CHARACTERISTIC_UUID,
-        (error, characteristic) => {
-          if (error) {
-            console.error('[BLE] Characteristic monitoring error:', error);
-            return;
-          }
-
-          if (characteristic?.value) {
-            // Decode base64 value
-            const decodedValue = Buffer.from(
-              characteristic.value,
-              'base64',
-            ).toString('utf-8');
-            processCharacteristicValue(decodedValue);
-          }
-        },
-      );
-
-      globalDevice = device;
-      globalIsConnected = true;
+      // Keep the process (and this BLE link + audio) alive with the screen off.
+      // Started here and kept running across drops/reconnects; only a deliberate
+      // disconnect()/stop() tears it down.
+      await startBleForegroundService(globalDevice?.name || undefined);
 
       console.log('[BLE] Successfully connected and subscribed');
 
@@ -306,29 +493,20 @@ const BluetoothLEService = {
       return true;
     } catch (error) {
       console.error('[BLE] Connection error:', error);
-      globalDevice = null;
-      globalIsConnected = false;
+      await teardownConnection();
       return false;
     }
   },
 
-  // Disconnect from current device
+  // Disconnect from current device (deliberate — disarms auto-reconnect)
   disconnect: async (): Promise<void> => {
     try {
-      // Remove subscription
-      if (characteristicSubscription) {
-        characteristicSubscription.remove();
-        characteristicSubscription = null;
-      }
-
-      // Disconnect device
-      if (globalDevice) {
-        await globalDevice.cancelConnection();
-        console.log('[BLE] Disconnected from device');
-      }
-
-      globalDevice = null;
-      globalIsConnected = false;
+      shouldStayConnected = false;
+      currentDeviceId = null;
+      cancelReconnect();
+      await teardownConnection();
+      await stopBleForegroundService();
+      console.log('[BLE] Disconnected from device');
     } catch (error) {
       console.error('[BLE] Disconnect error:', error);
       globalDevice = null;
@@ -370,7 +548,11 @@ const BluetoothLEService = {
   // Stop service and cleanup
   stop: async (): Promise<void> => {
     console.log('[BLE] Stopping BLE service...');
-    await BluetoothLEService.disconnect();
+    shouldStayConnected = false;
+    currentDeviceId = null;
+    cancelReconnect();
+    await teardownConnection();
+    await stopBleForegroundService();
     globalMessageHandlers.length = 0;
 
     if (bleManager) {
