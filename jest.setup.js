@@ -90,6 +90,25 @@ jest.mock('react-native-audio-api', () => ({
   AudioBufferSourceNode: jest.fn(),
 }));
 
+// Mock @notifee/react-native (foreground service). Individual tests may provide
+// their own mock; this default keeps unrelated suites from loading the native
+// module.
+jest.mock('@notifee/react-native', () => ({
+  __esModule: true,
+  default: {
+    registerForegroundService: jest.fn(),
+    displayNotification: jest.fn(() => Promise.resolve()),
+    stopForegroundService: jest.fn(() => Promise.resolve()),
+    createChannel: jest.fn(() => Promise.resolve()),
+    requestPermission: jest.fn(() => Promise.resolve()),
+  },
+  AndroidForegroundServiceType: {
+    FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE: 16,
+    FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK: 2,
+  },
+  AndroidImportance: {LOW: 2},
+}));
+
 // Mock react-native-ble-plx
 jest.mock('react-native-ble-plx', () => ({
   BleManager: jest.fn(() => ({
@@ -99,19 +118,6 @@ jest.mock('react-native-ble-plx', () => ({
     onStateChange: jest.fn(),
     state: jest.fn(() => Promise.resolve('PoweredOn')),
   })),
-}));
-
-// Mock react-native-sound-player
-jest.mock('react-native-sound-player', () => ({
-  playSoundFile: jest.fn(),
-  loadSoundFile: jest.fn(),
-  playUrl: jest.fn(),
-  stop: jest.fn(),
-  pause: jest.fn(),
-  resume: jest.fn(),
-  seek: jest.fn(),
-  setSpeaker: jest.fn(),
-  setVolume: jest.fn(),
 }));
 
 // Mock react-native-documents/picker

@@ -4,6 +4,11 @@ import {Buffer} from 'buffer';
 import StorageService from './storage';
 import UDPMessageValidator from './udpValidator';
 import Mutex from './udpMutex';
+import {
+  startUdpForegroundService,
+  stopUdpForegroundService,
+} from './foregroundService';
+import WifiLock from './wifiLock';
 
 // Define types for ESP messages
 export interface ESPMessage {
@@ -167,6 +172,20 @@ const safelyCloseSocket = () => {
   clearAllTimers();
 };
 
+// Keep the app process AND the Wi-Fi radio alive while the socket is bound, so
+// UDP packets keep arriving with the screen off / app backgrounded (Doze). Both
+// calls are idempotent and Android-only; fire-and-forget so the socket callbacks
+// that invoke this stay synchronous.
+const syncKeepAlive = (listening: boolean) => {
+  if (listening) {
+    void startUdpForegroundService(globalPort);
+    void WifiLock.acquire();
+  } else {
+    void stopUdpForegroundService();
+    void WifiLock.release();
+  }
+};
+
 // Create a stable version of UDP listener hook that uses global state
 export function useUDPListener() {
   const [messages, setMessages] = useState<ESPMessage[]>([]);
@@ -278,12 +297,14 @@ export function useUDPListener() {
           safelyCloseSocket();
           globalIsListening = false;
           setIsListening(false);
+          syncKeepAlive(false);
         } else {
           console.log(`UDP server listening on port ${globalPort}`);
           globalIsListening = true;
           setIsListening(true);
           setError(null);
           resetReconnectAttempts();
+          syncKeepAlive(true);
         }
       });
       } catch (err) {
@@ -293,6 +314,7 @@ export function useUDPListener() {
         safelyCloseSocket();
         globalIsListening = false;
         setIsListening(false);
+        syncKeepAlive(false);
 
         // Attempt exponential backoff reconnection
         if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
@@ -319,6 +341,7 @@ export function useUDPListener() {
       safelyCloseSocket();
       globalIsListening = false;
       setIsListening(false);
+      syncKeepAlive(false);
       resetReconnectAttempts();
     });
   };
@@ -401,9 +424,11 @@ export const UDPService = {
             );
             safelyCloseSocket();
             globalIsListening = false;
+            syncKeepAlive(false);
           } else {
             console.log(`UDP service listening on port ${globalPort}`);
             globalIsListening = true;
+            syncKeepAlive(true);
           }
 
           isBindingOrClosing = false;
@@ -451,6 +476,7 @@ export const UDPService = {
 
     safelyCloseSocket();
     globalIsListening = false;
+    syncKeepAlive(false);
 
     trackedSetTimeout(() => {
       isBindingOrClosing = false;

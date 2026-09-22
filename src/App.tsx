@@ -12,7 +12,7 @@ import {setSettings} from './store/slices/settings';
 import StorageService from './services/storage';
 import ErrorBoundary from './components/ErrorBoundary';
 import StreamingLoopPlayer from './components/StreamingLoopPlayer';
-import {registerBleForegroundService} from './services/foregroundService';
+import {registerForegroundService} from './services/foregroundService';
 import '../global.css';
 
 function App(): React.JSX.Element {
@@ -20,10 +20,11 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const initializeApp = async () => {
       try {
-        // Register the BLE foreground-service task now that the RN runtime is
-        // ready (must NOT run at bundle top-level — notifee's native module is
-        // not resolvable during early bridgeless startup).
-        registerBleForegroundService();
+        // Register the foreground-service task now that the RN runtime is ready
+        // (must NOT run at bundle top-level — notifee's native module is not
+        // resolvable during early bridgeless startup). Covers both the BLE link
+        // and the UDP listener; the service is ref-counted per subsystem.
+        registerForegroundService();
 
         // Load app settings from storage first
         const settings = await StorageService.loadSettings();
