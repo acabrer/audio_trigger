@@ -141,6 +141,10 @@ export const AudioService = {
   // Flag to track if system has been pre-warmed
   isPrewarmed: false,
 
+  // Guard against concurrent AudioContext rebuilds (output route changes can
+  // fire several device-change callbacks in a burst).
+  isRebuilding: false,
+
   // Pre-warm the audio system for minimal latency
   // Eliminates cold-start penalty (5-8ms)
   prewarmAudioSystem: async (): Promise<boolean> => {
@@ -162,6 +166,9 @@ export const AudioService = {
         console.error('[Prewarm] Audio context not available');
         return false;
       }
+
+      // Make sure the context is running before we touch it.
+      await AudioService.ensureContextRunning();
 
       // Create and play a silent buffer to wake up audio hardware
       const ctx = AudioService.audioContext;
@@ -309,6 +316,22 @@ export const AudioService = {
         AudioService.audioContext = new AudioContext();
       }
 
+      // Some platforms (observed on Android 15 / HyperOS) create the context in
+      // a 'suspended' state. While suspended the audio clock does not advance:
+      // sources scheduled with start() produce NO sound and never fire onended
+      // (so the "Now Playing" banner sticks and stacks up). Resume so playback
+      // actually runs. Harmless no-op when already 'running'.
+      const ctx = AudioService.audioContext;
+      if (ctx.state !== 'running') {
+        const prevState = ctx.state;
+        try {
+          await ctx.resume();
+          console.log(`[Audio] AudioContext resumed (was ${prevState}, now ${ctx.state})`);
+        } catch (resumeErr) {
+          console.warn('[Audio] Failed to resume AudioContext:', resumeErr);
+        }
+      }
+
       console.log('Audio service initialized with react-native-audio-api');
       AudioService.isInitialized = true;
 
@@ -322,6 +345,68 @@ export const AudioService = {
       console.error('Failed to initialize audio service:', error);
       AudioService.isInitialized = false;
       return false;
+    }
+  },
+
+  // Ensure the AudioContext is running. The OS can move it to 'suspended'
+  // (creation on some devices, or when the app is backgrounded) and while
+  // suspended nothing plays and onended never fires. Cheap no-op when running.
+  ensureContextRunning: async (): Promise<void> => {
+    const ctx = AudioService.audioContext;
+    if (ctx && ctx.state !== 'running') {
+      try {
+        await ctx.resume();
+      } catch (e) {
+        console.warn('[Audio] ensureContextRunning: resume failed:', e);
+      }
+    }
+  },
+
+  // Rebuild the AudioContext on a fresh output stream. react-native-audio-api's
+  // Oboe stream does NOT survive an audio OUTPUT route change (Bluetooth
+  // connect/disconnect, wired headset): the stream is disconnected and never
+  // reopened, so playback goes permanently silent until the app restarts. When
+  // the native AudioDeviceObserver reports a change we recreate the context so a
+  // new stream opens on the current device. Only runs on route changes, so the
+  // steady-state playback path is untouched.
+  rebuildContext: async (): Promise<void> => {
+    if (AudioService.isRebuilding) {
+      return;
+    }
+    AudioService.isRebuilding = true;
+    try {
+      console.log('[Audio] Rebuilding AudioContext (output route changed)...');
+      const old = AudioService.audioContext;
+
+      // Drop references so initialize() creates a fresh context, and clear
+      // tracking for sounds whose (now-dead) sources belonged to the old context.
+      AudioService.audioContext = null;
+      AudioService.isInitialized = false;
+      AudioService.isPrewarmed = false;
+      AudioService.activeSounds.clear();
+
+      // Close the old, disconnected context. Best-effort.
+      if (old) {
+        try {
+          await old.close();
+        } catch (e) {
+          // already closed / not supported — ignore
+        }
+      }
+
+      // Fresh context (initialize() also resumes it) on the current output device.
+      await AudioService.initialize();
+
+      // Buffers were decoded against the old context; re-decode on the new one so
+      // playback is guaranteed valid on the new device.
+      AudioService.audioBufferCache.clear();
+      await AudioService.preloadAllAudioFiles();
+
+      console.log('[Audio] AudioContext rebuilt for the new output device');
+    } catch (e) {
+      console.error('[Audio] rebuildContext failed:', e);
+    } finally {
+      AudioService.isRebuilding = false;
     }
   },
 
@@ -811,6 +896,13 @@ export const AudioService = {
       const stopExistingTime = performance.now() - checkpoint5;
       perfTracker.track('playback_stop_existing', stopExistingTime);
 
+      // Guarantee the context is running before scheduling. The check is
+      // synchronous and only awaits in the rare 'suspended' case, so the normal
+      // running path adds no latency.
+      if (ctx.state !== 'running') {
+        await AudioService.ensureContextRunning();
+      }
+
       // ===== CHECKPOINT 6: Create Audio Source =====
       // PHASE 1: Wrap in try-catch for release build robustness
       let source: AudioBufferSourceNode;
@@ -910,6 +1002,9 @@ export const AudioService = {
       }
 
       const ctx = AudioService.audioContext;
+
+      // Make sure the context is running (manual preview path is not latency-critical).
+      await AudioService.ensureContextRunning();
 
       // Load audio files
       const audioFiles = await AudioService.loadAudioFiles();

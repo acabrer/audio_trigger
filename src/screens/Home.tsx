@@ -236,9 +236,16 @@ const HomeScreen: React.FC = () => {
         await AudioService.prewarmAudioSystem();
         console.log('Audio system pre-warmed');
 
-        // Initialize BLE service
-        await BluetoothLEService.initialize();
-        console.log('BLE service initialized');
+        // Initialize BLE service. Must never abort Home init — otherwise the
+        // UDP message subscription below never registers and the ESP is never
+        // detected (this happens when a stale BleManager throws after the
+        // foreground service kept the process alive across a restart).
+        try {
+          await BluetoothLEService.initialize();
+          console.log('BLE service initialized');
+        } catch (bleErr) {
+          console.warn('BLE init failed (non-fatal), continuing:', bleErr);
+        }
 
         if (!mounted) return;
         setIsInitialized(true);

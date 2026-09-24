@@ -71,6 +71,11 @@ jest.mock('react-native-udp', () => ({
 // Mock react-native-audio-api
 jest.mock('react-native-audio-api', () => ({
   AudioContext: jest.fn(() => ({
+    state: 'running',
+    currentTime: 0,
+    resume: jest.fn(() => Promise.resolve()),
+    suspend: jest.fn(() => Promise.resolve()),
+    close: jest.fn(() => Promise.resolve()),
     createBufferSource: jest.fn(() => ({
       buffer: null,
       connect: jest.fn(),

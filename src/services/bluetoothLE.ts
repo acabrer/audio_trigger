@@ -384,27 +384,53 @@ const BluetoothLEService = {
   initialize: async (): Promise<void> => {
     console.log('[BLE] Initializing BLE service...');
 
-    if (!bleManager) {
-      bleManager = new BleManager();
+    try {
+      if (!bleManager) {
+        bleManager = new BleManager();
+      }
+
+      // Register the foreground-reconnect listener once (process-lifetime).
+      setupAppStateListener();
+
+      // Request permissions
+      const hasPermissions = await BluetoothLEService.requestPermissions();
+      if (!hasPermissions) {
+        console.warn('[BLE] Bluetooth permissions not granted');
+        return;
+      }
+
+      // Check if Bluetooth is powered on. The JS process can outlive its
+      // BleManager when a foreground service keeps the process alive across an
+      // Activity restart — reopening then reuses a *destroyed* manager and
+      // `.state()` throws "BleManager was destroyed". Detect that, recreate the
+      // manager once, and retry so re-initialization on a persisted process
+      // behaves like a fresh launch.
+      try {
+        const state = await bleManager.state();
+        if (state !== State.PoweredOn) {
+          console.warn('[BLE] Bluetooth is not powered on, state:', state);
+        }
+      } catch (staleErr) {
+        console.warn('[BLE] Stale BleManager detected, recreating:', staleErr);
+        try {
+          bleManager?.destroy();
+        } catch {
+          // ignore — already destroyed
+        }
+        bleManager = new BleManager();
+        const state = await bleManager.state();
+        if (state !== State.PoweredOn) {
+          console.warn('[BLE] Bluetooth is not powered on, state:', state);
+        }
+      }
+
+      console.log('[BLE] BLE service initialized');
+    } catch (err) {
+      // BLE init must NEVER abort app/screen initialization. In UDP mode the
+      // listener/subscription must come up even when BLE is unavailable, so we
+      // swallow any failure here rather than let it propagate.
+      console.warn('[BLE] initialize() failed (non-fatal):', err);
     }
-
-    // Register the foreground-reconnect listener once (process-lifetime).
-    setupAppStateListener();
-
-    // Request permissions
-    const hasPermissions = await BluetoothLEService.requestPermissions();
-    if (!hasPermissions) {
-      console.warn('[BLE] Bluetooth permissions not granted');
-      return;
-    }
-
-    // Check if Bluetooth is powered on
-    const state = await bleManager.state();
-    if (state !== State.PoweredOn) {
-      console.warn('[BLE] Bluetooth is not powered on, state:', state);
-    }
-
-    console.log('[BLE] BLE service initialized');
   },
 
   // Scan for ESP32 devices
